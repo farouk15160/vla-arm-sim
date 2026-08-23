@@ -40,9 +40,10 @@ from std_srvs.srv import Trigger
 
 from groot_vla.moveit_helper import MoveItError, MoveItHelper
 from groot_vla.pick_place_demo import HOME_JOINTS, pick_place_sequence
+from groot_vla.domain_randomizer import DomainRandomizer
 from groot_vla.scene_reset import CUBE_POSES, read_model_poses, set_model_pose
 
-TASK_TEMPLATE = "pick up the {colour} cube and place it in the tray"
+TASK_TEMPLATE = "pick up the {description} and place it in the tray"
 
 
 class DemoCollector(Node):
@@ -58,6 +59,15 @@ class DemoCollector(Node):
         self.declare_parameter("jitter", 0.06)
         self.declare_parameter("seed", 0)
         self.declare_parameter("settle_time", 1.5)
+        # Domain randomisation: vary lighting, surface colour, walls and the
+        # objects themselves so the dataset teaches the task rather than the
+        # decor. Off gives the fixed three-cube scene.
+        self.declare_parameter("domain_randomize", True)
+        self.declare_parameter("distractors", 2)
+        # Spheres roll out of the gripper and fail often. They are available,
+        # but not collected by default because every failure is a wasted
+        # episode.
+        self.declare_parameter("shapes", ["box", "cylinder"])
 
         self.episodes = int(self.get_parameter("episodes").value)
         self.cubes = [str(c) for c in self.get_parameter("cubes").value]
@@ -65,7 +75,13 @@ class DemoCollector(Node):
         self.randomize = bool(self.get_parameter("randomize").value)
         self.jitter = float(self.get_parameter("jitter").value)
         self.settle_time = float(self.get_parameter("settle_time").value)
-        self._rng = np.random.default_rng(int(self.get_parameter("seed").value))
+        seed = int(self.get_parameter("seed").value)
+        self._rng = np.random.default_rng(seed)
+        self.domain_randomize = bool(self.get_parameter("domain_randomize").value)
+        self.distractors = int(self.get_parameter("distractors").value)
+        self._randomizer = DomainRandomizer(
+            self.world, seed, tuple(str(x) for x in self.get_parameter("shapes").value)
+        )
 
         self.moveit_node = rclpy.create_node("collect_demos_moveit")
         self.moveit = MoveItHelper(self.moveit_node)
@@ -126,13 +142,32 @@ class DemoCollector(Node):
             self.get_logger().info(
                 f"--- episode {episode + 1}/{self.episodes}: {cube} ---")
 
-            poses = self._reset_scene()
-            target = poses.get(cube, CUBE_POSES[cube])
+            # Move home BEFORE rebuilding the scene: the arm must not be
+            # standing where an object is about to be spawned.
             self.moveit.move_to_joints(HOME_JOINTS)
 
+            if self.domain_randomize:
+                scene = self._randomizer.randomize_all(self.distractors)
+                spawned = scene["target"]
+                # Read the pose back rather than trusting the requested one:
+                # the object settles under gravity before the demo starts.
+                poses = read_model_poses(self.world)
+                target = poses.get(spawned.name, spawned.position)
+                description = spawned.description
+                self.get_logger().info(
+                    f"    target {description} at "
+                    f"({target[0]:.3f}, {target[1]:.3f}), "
+                    f"distractors {[o.description for o in scene['distractors']]}")
+            else:
+                poses = self._reset_scene()
+                target = poses.get(cube, CUBE_POSES[cube])
+                description = f"{colour} cube"
+
             # The recorder stamps this on the episode; it becomes the language
-            # instruction the policy is conditioned on.
-            self._task_pub.publish(String(data=TASK_TEMPLATE.format(colour=colour)))
+            # instruction the policy is conditioned on. It must name what was
+            # ACTUALLY spawned, or the policy learns the wrong word-object link.
+            self._task_pub.publish(
+                String(data=TASK_TEMPLATE.format(description=description)))
             time.sleep(0.3)
 
             if not self._call(self._start, "start_episode"):

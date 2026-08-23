@@ -320,19 +320,65 @@ ros2 launch groot_arm_bringup system.launch.py policy:=none gazebo_gui:=false
 
 # terminal 2: recorder
 ros2 run groot_vla episode_recorder --ros-args \
-    -p output_dir:=~/groot_episodes -p fps:=10.0 -p use_sim_time:=true
+    -p output_dir:=~/groot_demos -p fps:=10.0 -p use_sim_time:=true
 
 # terminal 3: drive it
-ros2 run groot_vla collect_demos --ros-args -p episodes:=40 -p use_sim_time:=true
+ros2 run groot_vla collect_demos --ros-args \
+    -p episodes:=40 -p distractors:=2 -p use_sim_time:=true
 ```
 
-`collect_demos` resets the scene with jittered cube positions, reads where the
-cubes *actually* landed, records, runs the same `pick_place_sequence` the
-standalone demo uses, and **discards any episode that fails** - a dataset
-containing failures teaches the policy to fail. The jitter is what stops the
-model memorising a single trajectory.
+`collect_demos` rebuilds the scene each episode, records, runs the same
+`pick_place_sequence` the standalone demo uses, and **discards any episode that
+fails** - a dataset containing failures teaches the policy to fail.
 
-About 16 MB and 15 s per episode at 10 fps.
+About 8 MB and 30 s per episode at 10 fps, so 40 episodes is ~20 minutes and
+300 MB.
+
+#### Domain randomisation
+
+Every episode varies, so the dataset teaches the task rather than the decor. A
+policy trained on one fixed scene learns *"the graspable thing is the small red
+square at pixel (x, y) on a beige table"* and fails the moment anything changes.
+
+| Varied | How |
+|---|---|
+| lighting | key light colour, direction, intensity |
+| table | surface colour (six families, jittered) |
+| walls | room colour |
+| objects | shape (box / cylinder / sphere), size 35-55 mm, colour, position |
+| distractors | extra objects that must be ignored |
+
+Deliberately **not** varied: the robot, camera poses, tray position, physics.
+Randomising the observer as well as the observed makes it much harder to tell
+whether a failure is the policy or the setup, and camera extrinsics are
+something a real deployment calibrates rather than guesses.
+
+The instruction names what was actually spawned — *"pick up the purple cylinder
+and place it in the tray"* — so the language grounds on the real object.
+
+```bash
+# preview one randomised scene without collecting
+ros2 run groot_vla domain_randomizer --distractors 3 --seed 7
+
+# fixed three-cube scene instead
+ros2 run groot_vla collect_demos --ros-args -p domain_randomize:=false
+# spheres too (they roll out of the gripper, so more episodes are discarded)
+ros2 run groot_vla collect_demos --ros-args -p shapes:='[box,cylinder,sphere]'
+```
+
+Two Gazebo behaviours worth knowing, both found the hard way:
+
+* A **static model re-created at runtime comes back without collision**. So the
+  table is never replaced — its colour comes from a thin, visual-only overlay
+  laid on top, and the world's collision surface is untouched. Replacing the
+  table drops every object through it to the floor (verified: objects end at
+  z = 0.02 instead of 0.62).
+* The `create`/`remove` services are **asynchronous** and return before the
+  entity exists; the `/blocking` variants are used throughout. Object removal
+  also sweeps the whole `obj_*` namespace rather than a list this process
+  built, because each run is a fresh process — otherwise leftovers block the
+  new spawns (which do not allow renaming) and the scene silently never
+  changes.
 
 ### 2. Convert to a LeRobot dataset
 
