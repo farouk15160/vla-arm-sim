@@ -159,6 +159,10 @@ class GrootPolicyNode(Node):
         self._gripper_publisher = self.create_publisher(JointTrajectory, self.gripper_command_topic, 10)
         self._twist_publisher = self.create_publisher(TwistStamped, self.servo_twist_topic, 10)
         self._status_publisher = self.create_publisher(String, "~/status", latching)
+        # What the policy actually emitted, for the GUI's live readout. Kept
+        # separate from ~/status so a slow subscriber cannot stall the status
+        # heartbeat, and so it can be echoed on its own for debugging.
+        self._action_publisher = self.create_publisher(String, "~/action", 10)
 
         self.create_service(SetBool, "~/enable", self._on_enable, callback_group=service_group)
         self.create_service(Trigger, "~/halt", self._on_halt, callback_group=service_group)
@@ -404,6 +408,7 @@ class GrootPolicyNode(Node):
         self._inference_count += 1
 
         arm_chunk, gripper_chunk = self._action_mapper.decode(raw_action)
+        self._publish_action(arm_chunk, gripper_chunk, current_arm)
 
         if self.action_space == "eef_delta":
             twist = self._action_mapper.to_twist(arm_chunk)
@@ -566,6 +571,36 @@ class GrootPolicyNode(Node):
             self._publish_twist(np.zeros(6))
             return
         self._publish_twist(twist)
+
+    def _publish_action(
+        self, arm_chunk: np.ndarray, gripper_chunk: np.ndarray, current_arm: np.ndarray
+    ) -> None:
+        """Publish the raw policy output for display.
+
+        Reports the FIRST step of the chunk, which is the one about to be
+        executed, plus the chunk length so a stalled policy is visible as a
+        chunk that never advances.
+        """
+        first = np.asarray(arm_chunk[0], dtype=float)
+        payload = {
+            "action_space": self.action_space,
+            "chunk_len": int(arm_chunk.shape[0]),
+            "arm": [round(float(v), 4) for v in first],
+            "gripper": (
+                round(float(gripper_chunk[0]), 4) if gripper_chunk.size else None
+            ),
+            "latency_ms": round(self._last_latency_ms, 1),
+            "instruction": self.instruction,
+            "stamp": round(time.monotonic(), 2),
+        }
+        if self.action_space in ("joint_position", "joint_delta"):
+            # Also report the delta from where the arm actually is, which is
+            # what tells you whether the policy is commanding a big jump.
+            payload["joint_names"] = list(ARM_JOINTS)
+            payload["delta_from_current"] = [
+                round(float(a - b), 4) for a, b in zip(first, current_arm)
+            ]
+        self._action_publisher.publish(String(data=json.dumps(payload)))
 
     def _publish_status(self) -> None:
         status = {

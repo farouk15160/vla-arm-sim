@@ -28,7 +28,9 @@ from interactive_markers import InteractiveMarkerServer, MenuHandler
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import (
     InteractiveMarker,
@@ -60,6 +62,18 @@ class GoalMarkerNode(Node):
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._busy = threading.Lock()
         self._status = self.create_publisher(String, "~/status", 10)
+        # Current marker pose, so the GUI can show the target without having to
+        # subscribe to the interactive-marker protocol itself.
+        self._pose_publisher = self.create_publisher(PoseStamped, "~/goal_pose", 10)
+        self.create_timer(0.2, self._publish_pose)
+
+        # Lets the GUI (or any script) trigger the move without a right-click.
+        # Reentrant: the callback blocks on the motion thread's lock check, and
+        # a mutually-exclusive group would stall the node's other callbacks.
+        self.create_service(
+            Trigger, "~/go_to_marker", self._on_go_service,
+            callback_group=ReentrantCallbackGroup(),
+        )
 
         # Separate node for MoveIt: MoveItHelper spins its own executor inside
         # blocking calls, and this node is driven by a MultiThreadedExecutor.
@@ -157,6 +171,35 @@ class GoalMarkerNode(Node):
         self._server.applyChanges()
 
     # ------------------------------------------------------------------ #
+    def _publish_pose(self) -> None:
+        pose = self._marker_pose()
+        if pose is None:
+            return
+        message = PoseStamped()
+        message.header.frame_id = self.base_frame
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.pose = pose
+        self._pose_publisher.publish(message)
+
+    def _on_go_service(self, _request, response):
+        """Move to wherever the marker currently sits."""
+        pose = self._marker_pose()
+        if pose is None:
+            response.success = False
+            response.message = "no marker pose available"
+            return response
+        if self._busy.locked():
+            response.success = False
+            response.message = "a motion is already running"
+            return response
+        self._start_move(pose)
+        response.success = True
+        response.message = (
+            f"moving to ({pose.position.x:.3f}, {pose.position.y:.3f}, "
+            f"{pose.position.z:.3f})"
+        )
+        return response
+
     def _publish_status(self, text: str) -> None:
         self._status.publish(String(data=text))
         self.get_logger().info(text)

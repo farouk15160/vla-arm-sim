@@ -22,8 +22,14 @@ PATTERNS=(
   "ros_gz_image/image_bridge"
   "robot_state_publisher/robot_state_publisher"
   "lib/groot_vla/"
+  # Policy servers appear under two different command lines: "-m
+  # groot_vla.<name>" when run by hand, and "share/groot_vla/servers/<name>.py"
+  # when started by system.launch.py. Matching only one leaves a server holding
+  # port 5555, and the next launch dies with "Address already in use".
+  "groot_vla/servers/"
   "groot_vla.mock_policy_server"
   "groot_vla.smolvla_server"
+  "groot_vla.openvla_server"
   "controller_manager/spawner"
 )
 

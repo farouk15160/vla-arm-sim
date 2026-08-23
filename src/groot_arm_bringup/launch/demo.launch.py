@@ -53,9 +53,15 @@ def generate_launch_description():
         condition=IfCondition(launch_rviz),
     )
 
-    # move_group's planning scene monitor needs /joint_states and a running
-    # controller_manager to advertise its controller list; starting it too
-    # early leaves it in a permanent "no controllers" state.
+    # move_group ALWAYS starts - it is not optional and not conditioned on any
+    # argument. The goal marker, the GUI's manual controls and the scripted
+    # demo all plan through it, so the cell is unusable without it. Only RViz
+    # is conditional.
+    #
+    # The delay is required, not cosmetic: move_group's planning scene monitor
+    # needs /joint_states and a running controller_manager to enumerate
+    # controllers, and starting it earlier leaves it permanently believing it
+    # has none.
     delayed_moveit = TimerAction(period=6.0, actions=[move_group, rviz])
 
     return LaunchDescription(

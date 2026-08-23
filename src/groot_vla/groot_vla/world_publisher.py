@@ -52,8 +52,10 @@ class WorldBox:
 
 
 WORLD_BOXES: list[WorldBox] = [
-    WorldBox("table_top", (1.0, 1.4, 0.05), (0.45, 0.0, 0.575), (0.65, 0.50, 0.35, 1.0)),
-    WorldBox("table_base", (0.85, 1.25, 0.55), (0.45, 0.0, 0.275), (0.30, 0.30, 0.32, 1.0)),
+    # Sizes and poses mirror worlds/tabletop.sdf. Keep them in step.
+    WorldBox("table_top", (1.4, 1.8, 0.05), (0.50, 0.0, 0.575), (0.65, 0.50, 0.35, 1.0)),
+    WorldBox("table_base", (1.2, 1.6, 0.55), (0.50, 0.0, 0.275), (0.30, 0.30, 0.32, 1.0)),
+    WorldBox("back_wall", (0.05, 4.0, 2.4), (-0.90, 0.0, 1.20), (0.55, 0.58, 0.62, 1.0)),
     WorldBox("tray", (0.22, 0.22, 0.01), (0.50, -0.35, 0.605), (0.25, 0.25, 0.30, 1.0)),
     WorldBox("red_cube", (0.04, 0.04, 0.04), (0.45, 0.16, 0.62),
              (0.90, 0.10, 0.10, 1.0), collision=False, dynamic=True),

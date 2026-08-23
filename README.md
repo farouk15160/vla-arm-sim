@@ -148,7 +148,18 @@ ros2 launch groot_arm_bringup system.launch.py \
   `/groot_policy/instruction`, so the task changes without restarting anything
 * **Manual control** — named poses (home / observe / up), gripper open and
   close, scene reset, and the scripted pick-and-place for a chosen cube
-* **Status** — armed state, server, inference count, failures, latency, last error
+* **System** — armed state, **MoveIt connection status**, server, inference
+  count, failures, latency, last error
+* **VLA output** — live bar per arm joint plus the gripper, showing exactly what
+  the policy is emitting while it is armed, with the chunk length, inference
+  latency, staleness, and the delta from the arm's current position. This is the
+  fastest way to tell a policy that is thinking from one that is stuck.
+* **RViz goal marker** — the marker's live pose and a **GO TO MARKER** button
+
+move_group is **always** started by the launch files — it is never optional,
+because the goal marker, the manual controls and the scripted demo all plan
+through it. The panel shows its connection state so you can see at a glance
+whether it is reachable.
 
 Blocking work runs on worker threads, so the window never freezes mid-motion,
 and motion buttons disable while a motion is in flight so a double-click cannot
@@ -162,14 +173,26 @@ objects. RViz and Gazebo now show the same thing, and the planner knows the
 table is there. Cube poses are polled live from Gazebo, so cubes the robot
 moves are followed rather than drawn where they started.
 
-`goal_marker` adds a draggable 6-DOF handle in RViz:
+`goal_marker` adds a draggable 6-DOF handle in RViz. Three ways to make the
+robot go there, easiest first:
 
-1. Drag the cyan sphere anywhere in the workspace (rings rotate, arrows translate).
-2. Right-click it → **Move here**. IK runs on the grasp frame, then it plans and executes.
+1. Drag the cyan sphere, then press **⇒ GO TO MARKER** in the control panel.
+2. Drag it, then right-click the marker → **Move here**.
+3. Right-click → tick **Auto-go on release**; from then on, simply letting go
+   of the marker moves the robot.
 
-Other menu entries: **Reset marker to TCP**, **Open/Close gripper**, and
-**Auto-go on release** — with that ticked, letting go of the marker moves the
-robot immediately, no menu needed.
+IK runs on the grasp frame (`tcp_link`), then it plans and executes through
+move_group. The panel shows the marker's live coordinates and reports success
+or the MoveIt error in its log.
+
+Scriptable too:
+
+```bash
+ros2 service call /goal_marker/go_to_marker std_srvs/srv/Trigger
+ros2 topic echo /goal_marker/goal_pose      # where the marker is
+```
+
+Other menu entries: **Reset marker to TCP**, **Open/Close gripper**.
 
 Both displays are already in the shipped RViz config. If you built your own,
 add *MarkerArray* on `/world_markers` and *InteractiveMarkers* on `/goal_marker`.
