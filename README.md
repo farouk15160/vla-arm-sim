@@ -134,7 +134,7 @@ Example — headless, your own fine-tuned SmolVLA, no GUI:
 
 ```bash
 ros2 launch groot_arm_bringup system.launch.py \
-    policy:=smolvla model_path:=~/smolvla_ur5e/checkpoints/last/pretrained_model \
+    policy:=smolvla model_path:=$PWD/data/checkpoints/pickplace/checkpoints/last/pretrained_model \
     gazebo_gui:=false gui:=false \
     instruction:="put the blue cube in the tray"
 ```
@@ -320,7 +320,7 @@ ros2 launch groot_arm_bringup system.launch.py policy:=none gazebo_gui:=false
 
 # terminal 2: recorder
 ros2 run groot_vla episode_recorder --ros-args \
-    -p output_dir:=~/groot_demos -p fps:=10.0 -p use_sim_time:=true
+    -p output_dir:=$PWD/data/demos/pickplace -p fps:=10.0 -p use_sim_time:=true
 
 # terminal 3: drive it
 ros2 run groot_vla collect_demos --ros-args \
@@ -398,9 +398,9 @@ local one.)
 ~/vla_venv/bin/lerobot-train \
     --policy.path=lerobot/smolvla_base \
     --policy.repo_id=local/smolvla_ur5e --policy.push_to_hub=false \
-    --dataset.repo_id=local/groot_ur5e --dataset.root=~/groot_lerobot \
+    --dataset.repo_id=local/groot_ur5e --dataset.root=$PWD/data/datasets/pickplace \
     --rename_map='{"observation.images.wrist_view": "observation.images.camera1", "observation.images.ego_view": "observation.images.camera2"}' \
-    --batch_size=4 --steps=20000 --output_dir=~/smolvla_ur5e \
+    --batch_size=4 --steps=20000 --output_dir=$PWD/data/checkpoints/pickplace \
     --policy.device=cuda --wandb.enable=false
 ```
 
@@ -415,7 +415,7 @@ trains only the action expert by default, which is what makes this fit.
 
 ```bash
 ros2 launch groot_arm_bringup system.launch.py policy:=smolvla \
-    model_path:=~/smolvla_ur5e/checkpoints/last/pretrained_model
+    model_path:=$PWD/data/checkpoints/pickplace/checkpoints/last/pretrained_model
 ```
 
 A fine-tuned checkpoint has **7-dim actions** (6 joints + gripper) where the
@@ -430,6 +430,28 @@ state `[6]` and action `[7]`; it loads happily and then dies on the first
 inference with *"The size of tensor a (6) must match the size of tensor b (7)"*.
 So the exporter writes the six arm joints as state, and the six joints plus
 gripper as action.
+
+## Where things live
+
+Generated data stays inside the workspace under `data/`, and is git-ignored:
+
+| Path | What |
+|---|---|
+| `data/demos/` | raw recordings (PNG + JSONL) from `episode_recorder` |
+| `data/datasets/` | LeRobot v3.0 datasets from `export_lerobot` |
+| `data/checkpoints/` | `lerobot-train` output |
+
+See `data/README.md` for what is currently there.
+
+The two policy virtualenvs stay in `$HOME` deliberately. A venv hardcodes
+absolute paths in `pyvenv.cfg` and every `bin/` shebang, so **moving one breaks
+every command inside it**. To relocate, delete and recreate at the new path:
+
+```bash
+rm -rf ~/vla_venv && python3 -m venv /new/path/vla_venv
+/new/path/vla_venv/bin/pip install \
+    "lerobot[smolvla] @ file://$HOME/path/to/lerobot" pyzmq msgpack msgpack-numpy
+```
 
 ## Packages
 

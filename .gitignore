@@ -11,8 +11,11 @@ __pycache__/
 *.egg
 
 # ---- recorded data and trained weights --------------------------------------
-# Episodes and checkpoints are large and machine-specific. Record your own with
-# `episode_recorder`; convert with `export_lerobot`.
+# Everything the pipeline produces lives under data/ and is deliberately NOT
+# tracked: a single training checkpoint is 1.3 GB and a 41-episode recording is
+# 312 MB. Record your own with `episode_recorder`, convert with
+# `export_lerobot`. See data/README.md for the layout.
+data/
 groot_episodes/
 groot_lerobot/
 *.safetensors
