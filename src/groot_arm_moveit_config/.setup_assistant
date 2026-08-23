@@ -1,0 +1,10 @@
+moveit_setup_assistant_config:
+  urdf:
+    package: groot_arm_description
+    relative_path: urdf/groot_arm.urdf.xacro
+    xacro_args: "ur_type:=ur5e name:=groot_arm sim_gazebo:=false"
+  srdf:
+    relative_path: srdf/groot_arm.srdf.xacro
+  package_settings:
+    author_name: farouk
+    author_email: farouk15160@gmail.com

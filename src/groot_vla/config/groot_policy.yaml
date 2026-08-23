@@ -1,0 +1,56 @@
+/**:
+  ros__parameters:
+    # ---------------------------------------------------------------- server
+    # Point this at wherever the GR00T server actually runs. Inference needs
+    # 16 GB+ of VRAM, so on most desktops that is a different machine:
+    #   uv run python gr00t/eval/run_gr00t_server.py \
+    #       --model-path nvidia/GR00T-N1.7-3B \
+    #       --embodiment-tag NEW_EMBODIMENT --device cuda:0 --host 0.0.0.0
+    policy_host: "127.0.0.1"
+    policy_port: 5555
+    policy_timeout_ms: 15000
+    api_token: ""
+
+    # ----------------------------------------------------------------- task
+    instruction: "pick up the red cube and place it in the tray"
+
+    # --------------------------------------------------------- modality wiring
+    # "nested" matches GR00T N1.7; use "flat" for N1.5-era checkpoints.
+    # Confirm against the server: ros2 run groot_vla probe_server --show-config
+    observation_schema: "nested"
+    arm_action_key: "single_arm"
+    gripper_action_key: "gripper"
+    wrist_camera_key: "wrist_view"
+    scene_camera_key: "ego_view"
+    use_wrist_camera: true
+    use_scene_camera: true
+    image_width: 224
+    image_height: 224
+
+    # -------------------------------------------------------------- control
+    # joint_position - absolute joint targets (most fine-tunes)
+    # joint_delta    - per-step increments
+    # eef_delta      - Cartesian velocity through moveit_servo
+    action_space: "joint_position"
+    control_rate: 10.0        # inference calls per second
+    execution_horizon: 8      # chunk steps executed before re-inferring
+    action_dt: 0.1            # seconds between chunk steps
+
+    # ---------------------------------------------------------------- safety
+    # A VLA can emit anything; these bounds are what stops it. Loosen them only
+    # after you have watched the policy behave.
+    max_joint_step: 0.15                 # rad between consecutive chunk steps
+    observation_timeout: 1.0             # halt if sensors go stale [s]
+    enforce_workspace: true
+    workspace_frame: "base_link"
+    tcp_frame: "tcp_link"
+    # [xmin, xmax, ymin, ymax, zmin, zmax], base_link frame (table at z=0)
+    workspace_bounds: [-0.2, 0.95, -0.75, 0.75, -0.10, 0.85]
+    start_enabled: false                 # enable via the ~/enable service
+    dry_run: false                       # log commands instead of sending them
+
+    # --------------------------------------------------------------- gripper
+    gripper_open_position: 0.04
+    gripper_closed_position: 0.0
+    # Set true if the checkpoint uses 1.0 = closed instead of 1.0 = open.
+    invert_gripper_action: false

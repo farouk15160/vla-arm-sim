@@ -1,0 +1,459 @@
+# VLA arm test cell — ROS 2 Jazzy + MoveIt 2 + Gazebo Harmonic
+
+A simulated UR5e with a parallel gripper and two cameras, driven by a
+vision-language-action policy. Simulation only.
+
+```
+ cameras + /joint_states ──► observation ──► policy server (ZMQ) ──► action chunk
+                                                                        │
+                              JointTrajectory / TwistStamped ──► ros2_control ──► Gazebo
+```
+
+The ROS side is a **protocol client**, not a model host. Swapping policies means
+starting a different server — the robot, MoveIt config and safety layer are
+untouched.
+
+## Which policy
+
+| Server | Params | VRAM measured | Latency | Action space | Fits your 6 GB? |
+|---|---|---|---|---|---|
+| `mock_policy_server` | — | none | ~1 ms | joint | yes — pipeline testing |
+| `smolvla_server` | 450M | **0.91 GB** | ~950 ms | joint | yes |
+| `openvla_server` | 7B @ 4-bit | **4.38 GB** | ~2.8-4.8 s | **eef_delta** | yes |
+| GR00T N1.7-3B | 3B | 16 GB+ | — | joint | no — remote GPU only |
+
+All four speak the same ZeroMQ + msgpack protocol, so the ROS side is
+identical for each. Pick one with `policy:=` on the launch file.
+
+**SmolVLA** is the fast default. **OpenVLA-7B** is the big one: 15 GB on disk,
+quantised to NF4 at load time so it runs in 4.38 GB. It emits 7-DoF
+end-effector deltas rather than joint targets, so it drives the arm through
+`moveit_servo` — `system.launch.py policy:=openvla` starts Servo for you.
+
+OpenVLA needs **its own venv**: it pins `transformers==4.40`, while LeRobot
+requires `>=4.57`. The two cannot coexist, and since each server is a separate
+process that costs nothing but disk.
+
+### Expect poor zero-shot behaviour
+
+`lerobot/smolvla_base` has never seen a UR5e with this gripper. Its declared
+state/action width is 6 (no gripper dimension) and its normalisation statistics
+come from other robots. Zero-shot it produces plausible-looking but
+task-incompetent motion — the arm moves, it does not solve the task. This is
+expected for any VLA on an unseen embodiment.
+
+To get real behaviour you must fine-tune: record demonstrations with
+`episode_recorder`, convert with `export_lerobot`, then train. See
+**Collecting data for fine-tuning** below. The value of this stack is that the
+full loop is measurable end to end on hardware you own.
+
+## Build
+
+```bash
+cd ~/Desktop/code/robotics_and_ros/groot_arm_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install
+source install/setup.bash
+```
+
+One non-ROS dependency for the ROS side:
+
+```bash
+sudo apt install python3-msgpack        # or: pip install --break-system-packages msgpack
+```
+
+`msgpack-numpy` is optional — `groot_vla/groot_client.py` contains a
+byte-identical fallback codec used automatically when it is absent.
+
+### Policy environment (separate from ROS)
+
+torch and lerobot must NOT go into the ROS environment. Build a venv once:
+
+```bash
+python3 -m venv ~/vla_venv
+~/vla_venv/bin/pip install \
+    "lerobot[smolvla] @ file://$HOME/path/to/lerobot" \
+    pyzmq msgpack msgpack-numpy
+~/vla_venv/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+Point the `file://` URL at your own LeRobot checkout, or drop the path and use
+`"lerobot[smolvla]"` to install from PyPI.
+
+Verified working: torch 2.7.1+cu126, CUDA available, lerobot 0.4.3, ~6.5 GB on disk.
+
+For OpenVLA, a second venv with its pinned stack:
+
+```bash
+python3 -m venv ~/openvla_venv
+~/openvla_venv/bin/pip install torch torchvision "transformers==4.40.1" \
+    "tokenizers==0.19.1" "timm==0.9.10" "accelerate==0.30.1" bitsandbytes \
+    pyzmq msgpack msgpack-numpy pillow numpy
+```
+
+`accelerate` must be pinned: newer versions call `.to()` on a 4-bit model,
+which bitsandbytes rejects. `bitsandbytes` must NOT be pinned to 0.43 — that
+version needs a `triton.ops` module recent torch no longer ships.
+
+---
+
+## Quick start — one command
+
+Everything (sim, MoveIt, RViz, world, goal marker, GUI, policy server, policy
+bridge) comes up from a single launch file:
+
+```bash
+cd ~/Desktop/code/robotics_and_ros/groot_arm_ws
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+
+ros2 launch groot_arm_bringup system.launch.py                    # mock, no GPU
+ros2 launch groot_arm_bringup system.launch.py policy:=smolvla    # 0.9 GB, ~1 Hz
+ros2 launch groot_arm_bringup system.launch.py policy:=openvla    # 4.4 GB, ~0.2 Hz
+ros2 launch groot_arm_bringup system.launch.py policy:=none       # robot only
+```
+
+The policy server is started for you in the right venv. `policy:=openvla` also
+starts `moveit_servo`, because OpenVLA speaks Cartesian deltas.
+
+### Arguments
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `policy` | `mock` | `none` / `mock` / `smolvla` / `openvla` |
+| `instruction` | pick up the red cube… | the task string |
+| `gui` | `true` | Qt control panel |
+| `rviz` | `true` | RViz |
+| `gazebo_gui` | `true` | Gazebo window (false = headless) |
+| `goal_marker` | `true` | draggable 3D goal in RViz |
+| `policy_host` / `policy_port` | `127.0.0.1` / `5555` | non-local host = connect, don't start |
+| `venv_python` | `~/vla_venv/bin/python` | interpreter for SmolVLA |
+| `openvla_python` | `~/openvla_venv/bin/python` | interpreter for OpenVLA |
+| `model_path` | *(empty)* | override the checkpoint (e.g. your fine-tune) |
+
+Example — headless, your own fine-tuned SmolVLA, no GUI:
+
+```bash
+ros2 launch groot_arm_bringup system.launch.py \
+    policy:=smolvla model_path:=~/smolvla_ur5e/checkpoints/last/pretrained_model \
+    gazebo_gui:=false gui:=false \
+    instruction:="put the blue cube in the tray"
+```
+
+## The control panel
+
+`gui:=true` opens a Qt window with everything you would otherwise type:
+
+* **Arm policy / Disable / HALT** — the policy enable service, plus a big red stop
+* **Task instruction** — a dropdown of preset tasks, editable; publishes to
+  `/groot_policy/instruction`, so the task changes without restarting anything
+* **Manual control** — named poses (home / observe / up), gripper open and
+  close, scene reset, and the scripted pick-and-place for a chosen cube
+* **Status** — armed state, server, inference count, failures, latency, last error
+
+Blocking work runs on worker threads, so the window never freezes mid-motion,
+and motion buttons disable while a motion is in flight so a double-click cannot
+queue two trajectories.
+
+## The RViz scene and the 3D goal marker
+
+`world_publisher` republishes the Gazebo world (table, tray, three cubes) as
+markers on `/world_markers`, and registers the static parts as MoveIt collision
+objects. RViz and Gazebo now show the same thing, and the planner knows the
+table is there. Cube poses are polled live from Gazebo, so cubes the robot
+moves are followed rather than drawn where they started.
+
+`goal_marker` adds a draggable 6-DOF handle in RViz:
+
+1. Drag the cyan sphere anywhere in the workspace (rings rotate, arrows translate).
+2. Right-click it → **Move here**. IK runs on the grasp frame, then it plans and executes.
+
+Other menu entries: **Reset marker to TCP**, **Open/Close gripper**, and
+**Auto-go on release** — with that ticked, letting go of the marker moves the
+robot immediately, no menu needed.
+
+Both displays are already in the shipped RViz config. If you built your own,
+add *MarkerArray* on `/world_markers` and *InteractiveMarkers* on `/goal_marker`.
+
+### Test it without a GPU
+
+```bash
+ros2 launch groot_arm_bringup system.launch.py policy:=mock
+```
+
+`mock_policy_server --behaviour hold` echoes the observed joint state back, so
+the arm must not move at all — the sharpest test that the pipeline adds no
+drift. `--behaviour wave` gives bounded motion proving trajectories reach the
+controllers.
+
+### Check a server before connecting the robot
+
+```bash
+ros2 run groot_vla probe_server --host 127.0.0.1 --port 5555
+```
+
+Reports reachability, modality config, which observation schema it accepts,
+action keys and shapes, and measured latency.
+
+## Classical baseline
+
+A scripted MoveIt pick-and-place, for comparison against whatever the policy does:
+
+```bash
+ros2 launch groot_arm_bringup demo.launch.py
+ros2 run groot_vla pick_place_demo --ros-args -p cube:=red_cube
+ros2 run groot_vla scene_reset --randomize      # reset between rollouts
+```
+
+---
+
+## Pointing at a real GR00T server
+
+On the GPU machine, from an Isaac-GR00T checkout:
+
+```bash
+uv run python gr00t/eval/run_gr00t_server.py \
+    --model-path nvidia/GR00T-N1.7-3B \
+    --embodiment-tag NEW_EMBODIMENT \
+    --device cuda:0 --host 0.0.0.0 --port 5555
+```
+
+Check what it expects **before** connecting the robot:
+
+```bash
+ros2 run groot_vla probe_server --host <GPU_HOST> --port 5555
+```
+
+`probe_server` reports reachability, the server's modality config, which
+observation schema it accepts, the action keys and shapes, and inference
+latency. It tells you exactly what to put in `groot_policy.yaml`. Then:
+
+```bash
+ros2 launch groot_arm_bringup vla.launch.py \
+    policy_host:=<GPU_HOST> \
+    instruction:="pick up the red cube and place it in the tray"
+```
+
+Change the task at runtime without restarting:
+
+```bash
+ros2 topic pub --once /groot_policy/instruction std_msgs/String "{data: 'put the blue cube in the tray'}"
+```
+
+### Observation schema
+
+GR00T's layout changed between releases and `groot_vla` supports both, selected
+by `observation_schema` in `config/groot_policy.yaml`:
+
+- `nested` (N1.7) — `{"video": {...}, "state": {...}, "language": {"task": [[...]]}}`
+- `flat` (N1.5) — `{"video.ego_view": ..., "state.single_arm": ..., "annotation.human.task_description": [...]}`
+
+Let `probe_server` decide; it tries both.
+
+### Action spaces
+
+Set `action_space` to match what your checkpoint emits:
+
+| Value | Meaning | Path to the robot |
+|---|---|---|
+| `joint_position` | absolute joint targets (rad) | JointTrajectory → `arm_controller` |
+| `joint_delta` | per-step increments (rad) | integrated, then as above |
+| `eef_delta` | 6-D Cartesian velocity | TwistStamped → `moveit_servo` |
+
+`eef_delta` additionally needs `ros2 launch groot_arm_moveit_config servo.launch.py`.
+The policy node selects Servo's TWIST command type for you on enable.
+
+---
+
+## Safety
+
+A VLA is a neural network, not a validated controller, and it will occasionally
+emit nonsense. Everything below is load-bearing — do not loosen it before you
+have watched the policy behave:
+
+- **starts disabled**, and `~/enable` refuses to arm if the server is not answering
+- per-step joint clamp (`max_joint_step`, default 0.15 rad)
+- absolute joint limits, tighter than the UR5e's own
+- **workspace box** on `tcp_link`; leaving it disables the policy and halts the arm
+- **stale-observation watchdog** — halts if cameras or joint states go quiet
+- any exception in the inference loop disables the policy rather than killing the thread
+- `dry_run: true` logs commands instead of sending them
+
+The workspace guard is not theoretical — during bring-up it caught a runaway
+positive-feedback loop and stopped the arm at the box edge.
+
+---
+
+## Collecting data for fine-tuning
+
+Zero-shot GR00T on a UR5e with a custom gripper is an out-of-distribution
+embodiment. Expect poor results without post-training.
+
+```bash
+ros2 run groot_vla episode_recorder --ros-args -p output_dir:=~/groot_episodes
+ros2 service call /episode_recorder/start_episode std_srvs/srv/Trigger
+#   ... drive the arm: RViz, pick_place_demo, or teleop ...
+ros2 service call /episode_recorder/stop_episode std_srvs/srv/Trigger
+
+# convert to a LeRobot dataset (needs pandas, pyarrow, ffmpeg)
+ros2 run groot_vla export_lerobot --input ~/groot_episodes --output ~/groot_lerobot
+```
+
+The exporter writes `meta/modality.json` alongside the LeRobot v2.1 layout —
+GR00T uses it to slice the flat state/action vectors into named modalities;
+LeRobot ignores it harmlessly.
+
+Fine-tune SmolVLA on what you recorded, then serve the result:
+
+```bash
+~/vla_venv/bin/python -m lerobot.scripts.lerobot_train \
+    --policy.path=lerobot/smolvla_base \
+    --dataset.repo_id=local/groot_lerobot \
+    --dataset.root=~/groot_lerobot \
+    --batch_size=8 --steps=20000 --output_dir=~/smolvla_ur5e
+
+~/vla_venv/bin/python src/groot_vla/groot_vla/smolvla_server.py \
+    --model-path ~/smolvla_ur5e/checkpoints/last/pretrained_model --port 5555
+```
+
+Batch size 8 is sized for 6 GB; raise it if you train elsewhere. A fine-tuned
+checkpoint carries 7-dim state/action, so the gripper works too.
+
+---
+
+## Packages
+
+| Package | Contents |
+|---|---|
+| `groot_arm_description` | UR5e (from `ur_description`) + parallel gripper + wrist/scene cameras, `gz_ros2_control`, tabletop world |
+| `groot_arm_moveit_config` | SRDF, kinematics, OMPL/Pilz, `move_group`, RViz, Servo |
+| `groot_arm_bringup` | `sim` / `demo` / `vla` launch files, `kill_stack.sh` |
+| `groot_vla` | policy client, observation builder, action mapper, policy node, **SmolVLA server**, mock server, probe, MoveIt helper, recorder, exporter |
+
+Key frames and topics:
+
+- `tcp_link` — grasp frame, midway between the fingers; the IK tip and the frame
+  `eef_delta` acts in
+- `/wrist_camera/image_raw`, `/scene_camera/image_raw` — 640×480 RGB at 30 Hz,
+  downsampled to 224×224 for the policy
+- `arm_controller`, `gripper_controller` — shared by MoveIt and the policy
+
+---
+
+## Verified
+
+Checked by running it on ROS 2 Jazzy / Gazebo Harmonic 8.11 / Ubuntu 24.04 /
+RTX 2060 6 GB:
+
+- URDF and SRDF load consistently; 21 links, 8 actuated joints
+- Gazebo brings up all controllers; `/joint_states` at 500 Hz; both cameras ~30 Hz
+- the fallback msgpack codec is **byte-identical** to `msgpack_numpy` across
+  ndarray, scalar, non-contiguous and nested payloads
+- **SmolVLA loads on the GPU in 0.91 GB** and serves real inferences at
+  ~950 ms each
+- **full closed loop with real SmolVLA: 58 inferences, 0 failures**, no safety
+  trips, arm driven continuously from camera + language input
+- mock-server loop: 392 inferences, 0 failures, motion bounded to exactly the
+  commanded amplitude
+- **scripted pick-and-place: 3/3 cubes** placed within ~2 mm of the tray centre,
+  confirmed from Gazebo ground truth (fingers stall at 0.0080 — the exact
+  theoretical contact point for a 40 mm cube — and hold through the lift)
+- gripper stress test: **24/24 open/close cycles, 0 failures**
+- `moveit_servo` moves the TCP along a commanded Cartesian axis with the other
+  two axes held under 1 mm
+- **OpenVLA-7B in 4-bit: 4.38 GB VRAM**, 24 inferences / 0 failures, driving
+  the arm 0.14 m through Servo on the eef_delta path
+- **one launch file** brings up sim + MoveIt + world + marker + GUI + server +
+  bridge with no errors
+- world markers match the Gazebo world exactly (table top at base_link
+  z = -0.025 = world 0.575, cubes at 0.62)
+- **goal marker: requested poses reached within 2.4 mm and 4.7 mm**
+- the Qt panel renders and shows live policy status
+
+## Known issues
+
+**Zero-shot SmolVLA does not solve the task.** It moves the arm smoothly and
+the loop is stable, but the motion is not task-directed — an unseen embodiment
+with unfamiliar joint ranges and foreign normalisation statistics. Fine-tuning
+is required for competent behaviour; the recorder and exporter exist for this.
+
+**`lerobot/smolvla_base` has no gripper dimension** (declared action width 6).
+`smolvla_server` detects this and holds the observed gripper value rather than
+inventing one, so the base model can position the arm but not grasp. A model
+fine-tuned on 7-dim data recorded from this cell drives the gripper normally.
+
+**Inference is ~950 ms on a 2060**, so the loop runs at ~1 Hz. That is why
+`smolvla_policy.launch.py` sets `control_rate: 1.0` and
+`observation_timeout: 3.0` — with the 10 Hz GR00T defaults the watchdog would
+trip on its own latency. Each reply covers `execution_horizon * action_dt` =
+0.8 s of motion, so the arm keeps moving between inferences.
+
+**OpenVLA is slow on this card** (~2.8-4.8 s per forward pass at 4-bit on a
+2060), so the loop runs at ~0.2 Hz. That is why `openvla_policy.yaml` republishes
+the last twist at 20 Hz: `moveit_servo` halts if commands stop for 0.25 s, and
+without republishing a 5 s inference gap would make the arm stutter. The held
+twist expires after `twist_hold_time` so a dead policy cannot leave it drifting.
+
+### Fixed since the first version
+
+- **gripper joints jammed after a few grasps** — the finger joint limits were
+  exactly the commanded range, so every full open/close drove the joint into a
+  mechanical stop until the physics engine's joint-limit constraint locked it.
+  The limits now sit 5 mm beyond the usable travel. 24/24 cycles clean.
+- **`friction="1.0"` on the finger joints** — `gz_ros2_control` drives position
+  interfaces with a *force*, so 1 N of Coulomb friction stalled a 50 g finger
+  while every layer above reported success. Now 0, matching `ur_description`.
+- **gripper goal tolerance (0.05) exceeded the joint's whole 0.04 stroke**, so
+  the controller reported "already at goal" instantly and never moved.
+- **`goal_time: 0.0`** means *wait forever*; a finger stalled on a cube hung
+  the action indefinitely. Now 0.5 s.
+- **`tcp_link` sat at the fingertips**, so "move the TCP to the object centre"
+  drove the fingers through the table. It is now the centre of the grasp region.
+- **`rclpy.spin_until_future_complete` per call** built a throwaway executor
+  each time and dropped action goal responses. `MoveItHelper` now owns one
+  persistent executor.
+- **table collision boxes overlapped the arm pedestal**, which would mark the
+  robot permanently in self-collision.
+- **`switch_command_type` deadlocked the enable service** — the client shared a
+  MutuallyExclusiveCallbackGroup with the `~/enable` callback that blocks on
+  its response, so the reply could never be processed. It now has its own
+  reentrant group.
+- **the goal marker acted on a stale pose** — it read the server's stored
+  marker pose instead of the pose carried in the feedback event.
+- **`kill_stack.sh` killed its own caller** — its `ros2 launch groot_arm`
+  pattern matched the command line of the shell about to start that launch.
+  Patterns now match executable paths and the script skips its own ancestry.
+
+## Troubleshooting
+
+**Motions fail with `MoveItErrorCode=-4` (CONTROL_FAILED), or you see
+"there may be more than one action server for /move_action".** You have two
+stacks running. `ros2 launch` does not always reap its children, and a leftover
+`move_group` will happily accept goals while its controllers are gone:
+
+```bash
+ros2 run groot_arm_bringup kill_stack.sh     # or src/groot_arm_bringup/scripts/kill_stack.sh
+```
+
+**Servo rejects everything with "Command type has not been set".** Jazzy's
+`moveit_servo` requires a command type before it accepts input, and there is no
+`start_servo` service (that was the Humble API):
+
+```bash
+ros2 service call /servo_node/switch_command_type \
+    moveit_msgs/srv/ServoCommandType "{command_type: 1}"   # 1 = TWIST
+```
+
+**The policy will not enable.** `~/enable` pings the server first and refuses if
+it is unreachable. Check with `ros2 run groot_vla probe_server --host ...`.
+
+**Nothing moves and there are no errors.** Check `actual` against `output`:
+
+```bash
+ros2 topic echo /gripper_controller/controller_state --once
+```
+
+If `output` tracks but `actual` does not, it is physics, not ROS. Note that
+`gz_ros2_control` drives position command interfaces with a *force* — non-zero
+`<dynamics friction="...">` on a light joint will stall it completely while
+every layer above reports success. `ur_description` uses `friction="0"` on every
+arm joint for exactly this reason.

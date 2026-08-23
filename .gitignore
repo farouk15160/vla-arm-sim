@@ -1,0 +1,37 @@
+# ---- colcon build artefacts -------------------------------------------------
+build/
+install/
+log/
+
+# ---- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.egg
+
+# ---- recorded data and trained weights --------------------------------------
+# Episodes and checkpoints are large and machine-specific. Record your own with
+# `episode_recorder`; convert with `export_lerobot`.
+groot_episodes/
+groot_lerobot/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.mp4
+
+# ---- policy virtualenvs -----------------------------------------------------
+# These live in $HOME by default (~/vla_venv, ~/openvla_venv); ignored here in
+# case anyone creates them inside the workspace.
+vla_venv/
+openvla_venv/
+.venv/
+venv/
+
+# ---- editors / OS -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

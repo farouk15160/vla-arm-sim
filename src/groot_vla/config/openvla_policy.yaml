@@ -1,0 +1,60 @@
+/**:
+  ros__parameters:
+    # ------------------------------------------------------------------ server
+    #   ~/vla_venv/bin/python \
+    #       <share>/groot_vla/servers/openvla_server.py --port 5555
+    policy_host: "127.0.0.1"
+    policy_port: 5555
+    # 7B in 4-bit on a 2060 is slow; do not let the client give up mid-forward.
+    policy_timeout_ms: 60000
+    api_token: ""
+
+    instruction: "pick up the red cube and place it in the tray"
+
+    observation_schema: "nested"
+    arm_action_key: "single_arm"
+    gripper_action_key: "gripper"
+    # OpenVLA is single-image and was trained on third-person views, so the
+    # wrist camera is off: sending it a wrist frame is out of distribution.
+    wrist_camera_key: "wrist_view"
+    scene_camera_key: "ego_view"
+    use_wrist_camera: false
+    use_scene_camera: true
+    # OpenVLA's processor expects 224x224.
+    image_width: 224
+    image_height: 224
+
+    # --------------------------------------------------------------- control
+    # OpenVLA emits [dx dy dz droll dpitch dyaw gripper] end-effector deltas,
+    # streamed to moveit_servo. Start servo.launch.py alongside, or use
+    # system.launch.py policy:=openvla which does it for you.
+    action_space: "eef_delta"
+    # Measured ~4.8 s per forward pass on a 6 GB RTX 2060, so ~0.2 Hz. Raise it
+    # if your GPU is faster; the loop simply runs more often.
+    control_rate: 0.2
+    execution_horizon: 1
+    action_dt: 0.1
+    # Servo halts if commands stop for incoming_command_timeout (0.25 s), which
+    # a 5 s inference period would trip constantly. The last twist is replayed
+    # at this rate, and expires after twist_hold_time so a dead policy cannot
+    # leave the arm drifting.
+    twist_republish_rate: 20.0
+    twist_hold_time: 2.0
+
+    # ---------------------------------------------------------------- safety
+    # Cartesian velocity caps live in ActionMapper (max_linear_velocity /
+    # max_angular_velocity) and in servo.yaml's scale block. Both apply.
+    max_joint_step: 0.15
+    observation_timeout: 5.0
+    enforce_workspace: true
+    workspace_frame: "base_link"
+    tcp_frame: "tcp_link"
+    workspace_bounds: [-0.2, 0.95, -0.75, 0.75, -0.10, 0.85]
+    start_enabled: false
+    dry_run: false
+
+    gripper_open_position: 0.04
+    gripper_closed_position: 0.0
+    # OpenVLA's gripper convention is 1 = open on most OXE subsets; flip here
+    # if your unnorm_key's dataset used the opposite.
+    invert_gripper_action: false

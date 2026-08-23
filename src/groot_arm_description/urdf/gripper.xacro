@@ -1,0 +1,128 @@
+<?xml version="1.0"?>
+<!--
+  Simple parallel two-finger gripper.
+
+  Deliberately self-contained (primitive geometry, no external meshes) so the
+  stack has no dependency on robotiq_description / any vendor package. Both
+  fingers are independently actuated joints driven to the same command by a
+  JointTrajectoryController; this avoids URDF <mimic> handling, which is still
+  inconsistent across gz_ros2_control versions.
+
+  Joint value semantics: 0.0 = fully closed, ${stroke} = fully open (per finger,
+  so total aperture is 2 * value).
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro">
+
+  <xacro:macro name="parallel_gripper" params="
+    prefix
+    parent
+    stroke:=0.04
+    limit_margin:=0.005
+    finger_length:=0.055
+    palm_depth:=0.055
+    max_effort:=120.0
+    max_velocity:=0.15
+    ">
+
+    <!-- ============================ palm ============================ -->
+    <joint name="${prefix}gripper_base_joint" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${prefix}gripper_base_link"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+
+    <link name="${prefix}gripper_base_link">
+      <visual>
+        <origin xyz="0 0 ${palm_depth/2}" rpy="0 0 0"/>
+        <geometry><box size="0.09 0.075 ${palm_depth}"/></geometry>
+        <material name="gripper_dark"><color rgba="0.15 0.15 0.17 1.0"/></material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 ${palm_depth/2}" rpy="0 0 0"/>
+        <geometry><box size="0.09 0.075 ${palm_depth}"/></geometry>
+      </collision>
+      <inertial>
+        <origin xyz="0 0 ${palm_depth/2}" rpy="0 0 0"/>
+        <mass value="0.6"/>
+        <inertia ixx="6.0e-4" ixy="0.0" ixz="0.0" iyy="7.0e-4" iyz="0.0" izz="6.0e-4"/>
+      </inertial>
+    </link>
+
+    <!-- ========================== fingers =========================== -->
+    <!--
+      left  slides along +y, right slides along -y. Same commanded value on
+      both => symmetric aperture about the tool axis.
+    -->
+    <xacro:macro name="finger" params="side sign">
+      <joint name="${prefix}${side}_finger_joint" type="prismatic">
+        <parent link="${prefix}gripper_base_link"/>
+        <child link="${prefix}${side}_finger_link"/>
+        <origin xyz="0 ${sign*0.012} ${palm_depth}" rpy="0 0 0"/>
+        <axis xyz="0 ${sign} 0"/>
+        <!-- Limits are deliberately WIDER than the commanded range [0, stroke].
+             gz_ros2_control drives position interfaces with a force, and
+             repeatedly pushing a joint into a hard stop makes the physics
+             engine's joint-limit constraint lock it: the controller's output
+             keeps tracking while the joint stops responding for the rest of
+             the session. Both fingers used to jam exactly at 0.0 and at
+             stroke. The margin means a fully open or fully closed command
+             never reaches the mechanical stop. -->
+        <limit lower="${-limit_margin}" upper="${stroke + limit_margin}"
+               effort="${max_effort}" velocity="${max_velocity}"/>
+        <!-- Must stay at zero. gz_ros2_control drives position command
+             interfaces with a force; Coulomb friction of even 1 N stalls a
+             50 g finger outright, so the controller output tracks perfectly
+             while the joint never moves. ur_description uses 0/0 on every
+             arm joint for the same reason. Grip is held by CONTACT friction
+             (the surface block below), not joint friction. -->
+        <dynamics damping="0.0" friction="0.0"/>
+      </joint>
+
+      <link name="${prefix}${side}_finger_link">
+        <visual>
+          <origin xyz="0 ${sign*0.006} ${finger_length/2}" rpy="0 0 0"/>
+          <geometry><box size="0.022 0.012 ${finger_length}"/></geometry>
+          <material name="finger_grey"><color rgba="0.35 0.36 0.4 1.0"/></material>
+        </visual>
+        <collision>
+          <origin xyz="0 ${sign*0.006} ${finger_length/2}" rpy="0 0 0"/>
+          <geometry><box size="0.022 0.012 ${finger_length}"/></geometry>
+        </collision>
+        <inertial>
+          <origin xyz="0 ${sign*0.006} ${finger_length/2}" rpy="0 0 0"/>
+          <mass value="0.05"/>
+          <inertia ixx="2.0e-5" ixy="0.0" ixz="0.0" iyy="2.0e-5" iyz="0.0" izz="4.0e-6"/>
+        </inertial>
+      </link>
+
+      <!-- High friction + soft contact so a light object can actually be held.
+           Rigid-body sims grasp badly with default mu; these values are tuned
+           for the 50 g cubes in worlds/tabletop.sdf. -->
+      <gazebo reference="${prefix}${side}_finger_link">
+        <mu1>2.0</mu1>
+        <mu2>2.0</mu2>
+        <kp>1e6</kp>
+        <kd>1e3</kd>
+        <minDepth>0.001</minDepth>
+        <maxVel>0.0</maxVel>
+      </gazebo>
+    </xacro:macro>
+
+    <xacro:finger side="left"  sign="1"/>
+    <xacro:finger side="right" sign="-1"/>
+
+    <!-- ===================== tool centre point ====================== -->
+    <!-- Grasp frame: the CENTRE of the region enclosed by the fingers, not the
+         fingertips. Putting it at the tips makes "move the TCP to the object
+         centre" drive the fingers half a finger-length into whatever the
+         object is resting on. This is the IK tip link used by MoveIt and the
+         frame the VLA end-effector actions act in. -->
+    <joint name="${prefix}tcp_joint" type="fixed">
+      <parent link="${prefix}gripper_base_link"/>
+      <child link="${prefix}tcp_link"/>
+      <origin xyz="0 0 ${palm_depth + finger_length / 2}" rpy="0 0 0"/>
+    </joint>
+    <link name="${prefix}tcp_link"/>
+
+  </xacro:macro>
+</robot>

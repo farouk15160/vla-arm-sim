@@ -1,0 +1,75 @@
+###############################################################################
+# moveit_servo configuration for VLA end-effector-delta control.
+#
+# Used when groot_vla runs with action_space: eef_delta - the policy emits a
+# 6-D Cartesian velocity streamed here as TwistStamped, and Servo handles IK,
+# singularity avoidance, joint limits and collision slowdown. For
+# action_space: joint_position / joint_delta this node is not needed.
+#
+# NOTE: parameter names follow the ROS 2 Jazzy moveit_servo schema
+# (generate_parameter_library, see moveit_servo/config/servo_parameters.yaml).
+# The Humble-era keys - ee_frame, planning_frame, robot_link_command_frame,
+# low_pass_filter_coeff, system_latency_compensation, collision_check_type -
+# no longer exist and will be REJECTED at startup.
+###############################################################################
+
+## Outgoing command rate
+publish_period: 0.01          # 100 Hz
+max_expected_latency: 0.1
+
+## Incoming commands
+# "speed_units" = the policy publishes real m/s and rad/s. Keep this; unitless
+# mode silently rescales and makes VLA outputs hard to reason about.
+command_in_type: "speed_units"
+scale:
+  linear: 0.25
+  rotational: 0.8
+  joint: 0.5
+incoming_command_timeout: 0.25   # a stalled policy must not leave the arm running
+# Twists are interpreted in the planning frame (base_link), not the tool frame,
+# which is what the policy's world-referenced deltas assume.
+apply_twist_commands_about_ee_frame: false
+
+## Output
+# Publishing a JointTrajectory lets Servo drive the SAME arm_controller MoveIt
+# uses, so no controller switch is needed to hand control between them.
+command_out_type: trajectory_msgs/JointTrajectory
+command_out_topic: /arm_controller/joint_trajectory
+publish_joint_positions: true
+publish_joint_velocities: false
+publish_joint_accelerations: false
+
+## Smoothing
+use_smoothing: true
+smoothing_filter_plugin_name: "online_signal_smoothing::AccelerationLimitedPlugin"
+
+## MoveIt wiring
+move_group_name: ur_manipulator
+# move_group owns the primary planning scene in this stack.
+is_primary_planning_scene_monitor: false
+monitored_planning_scene_topic: /monitored_planning_scene
+
+## Topics
+cartesian_command_in_topic: ~/delta_twist_cmds
+joint_command_in_topic: ~/delta_joint_cmds
+pose_command_in_topic: ~/pose_target_cmds
+joint_topic: /joint_states
+status_topic: ~/status
+
+## Singularity handling
+lower_singularity_threshold: 17.0
+hard_stop_singularity_threshold: 30.0
+leaving_singularity_threshold_multiplier: 2.0
+# Applied to every joint when a single value is given.
+joint_limit_margins: [0.12]
+
+## Collision checking
+check_collisions: true
+check_octomap_collisions: false
+collision_check_rate: 10.0
+self_collision_proximity_threshold: 0.01
+scene_collision_proximity_threshold: 0.02
+
+## Safety
+halt_all_joints_in_joint_mode: true
+halt_all_joints_in_cartesian_mode: true

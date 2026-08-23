@@ -1,0 +1,95 @@
+# Loaded by the gz_ros2_control plugin inside Gazebo (see groot_arm.urdf.xacro).
+#
+# Two command paths share the arm and are mutually exclusive at runtime:
+#   arm_controller          - trajectory following, used by MoveIt AND by the
+#                             VLA policy (which streams short action chunks as
+#                             trajectories on the ~/joint_trajectory topic)
+#   forward_position_controller - raw position streaming, kept inactive; useful
+#                             if you want the policy to bypass trajectory
+#                             interpolation entirely
+controller_manager:
+  ros__parameters:
+    update_rate: 500  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    gripper_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    forward_position_controller:
+      type: position_controllers/JointGroupPositionController
+
+arm_controller:
+  ros__parameters:
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    # The VLA republishes a fresh chunk every control period; without this the
+    # controller would reject each new trajectory as arriving in the past.
+    allow_nonzero_velocity_at_trajectory_end: true
+    constraints:
+      stopped_velocity_tolerance: 0.2
+      goal_time: 0.0
+      shoulder_pan_joint:  { trajectory: 0.5, goal: 0.05 }
+      shoulder_lift_joint: { trajectory: 0.5, goal: 0.05 }
+      elbow_joint:         { trajectory: 0.5, goal: 0.05 }
+      wrist_1_joint:       { trajectory: 0.5, goal: 0.05 }
+      wrist_2_joint:       { trajectory: 0.5, goal: 0.05 }
+      wrist_3_joint:       { trajectory: 0.5, goal: 0.05 }
+
+gripper_controller:
+  ros__parameters:
+    joints:
+      - left_finger_joint
+      - right_finger_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    allow_nonzero_velocity_at_trajectory_end: true
+    constraints:
+      stopped_velocity_tolerance: 0.05
+      # MUST be non-zero. goal_time 0.0 means "wait indefinitely", so a finger
+      # stalled on a grasped object never terminates the action and the caller
+      # hangs forever. With a timeout the controller aborts with
+      # GOAL_TOLERANCE_VIOLATED, which is exactly how a successful grasp ends.
+      goal_time: 0.5
+      # goal MUST stay well below the 0.04 m stroke. A tolerance wider than the
+      # joint's own range makes the controller report "already at goal" the
+      # instant it receives a command, and the fingers never move at all.
+      # A finger stalling on a grasped object exceeds this and returns
+      # GOAL_TOLERANCE_VIOLATED, which MoveItHelper.set_gripper treats as
+      # success - that is the intended path for a successful grasp.
+      left_finger_joint:  { trajectory: 0.1, goal: 0.005 }
+      right_finger_joint: { trajectory: 0.1, goal: 0.005 }
+
+forward_position_controller:
+  ros__parameters:
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+    interface_name: position

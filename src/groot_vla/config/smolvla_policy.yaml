@@ -1,0 +1,52 @@
+/**:
+  ros__parameters:
+    # ------------------------------------------------------------------ server
+    # Start it in the policy venv (NOT the ROS environment):
+    #   ~/vla_venv/bin/python \
+    #       src/groot_vla/groot_vla/smolvla_server.py --port 5555
+    policy_host: "127.0.0.1"
+    policy_port: 5555
+    # SmolVLA needs ~0.9-1.4 s per forward pass on an RTX 2060, so the client
+    # must not give up early.
+    policy_timeout_ms: 30000
+    api_token: ""
+
+    instruction: "pick up the red cube and place it in the tray"
+
+    # smolvla_server always replies in the nested layout.
+    observation_schema: "nested"
+    arm_action_key: "single_arm"
+    gripper_action_key: "gripper"
+    wrist_camera_key: "wrist_view"
+    scene_camera_key: "ego_view"
+    use_wrist_camera: true
+    use_scene_camera: true
+    # SmolVLA's processor resizes internally; 224 keeps the ZMQ payload small.
+    image_width: 224
+    image_height: 224
+
+    # --------------------------------------------------------------- control
+    action_space: "joint_position"
+    # ~1 Hz, matched to the measured inference latency. Each reply covers
+    # execution_horizon * action_dt = 0.8 s of motion, so the arm keeps moving
+    # smoothly between inferences instead of stuttering.
+    control_rate: 1.0
+    execution_horizon: 8
+    action_dt: 0.1
+
+    # ---------------------------------------------------------------- safety
+    # Same envelope as the GR00T config. A 450M policy is no more trustworthy
+    # than a 3B one.
+    max_joint_step: 0.15
+    # Must exceed the inference period or the watchdog trips on its own latency.
+    observation_timeout: 3.0
+    enforce_workspace: true
+    workspace_frame: "base_link"
+    tcp_frame: "tcp_link"
+    workspace_bounds: [-0.2, 0.95, -0.75, 0.75, -0.10, 0.85]
+    start_enabled: false
+    dry_run: false
+
+    gripper_open_position: 0.04
+    gripper_closed_position: 0.0
+    invert_gripper_action: false

@@ -1,0 +1,47 @@
+# MoveIt needs acceleration limits for time parameterisation; the UR URDF only
+# carries velocity/effort. Velocities are deliberately below the hardware
+# maxima so simulated motions stay watchable and stable.
+default_velocity_scaling_factor: 0.25
+default_acceleration_scaling_factor: 0.25
+
+joint_limits:
+  shoulder_pan_joint:
+    has_velocity_limits: true
+    max_velocity: 3.15
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  shoulder_lift_joint:
+    has_velocity_limits: true
+    max_velocity: 3.15
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  elbow_joint:
+    has_velocity_limits: true
+    max_velocity: 3.15
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  wrist_1_joint:
+    has_velocity_limits: true
+    max_velocity: 3.2
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  wrist_2_joint:
+    has_velocity_limits: true
+    max_velocity: 3.2
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  wrist_3_joint:
+    has_velocity_limits: true
+    max_velocity: 3.2
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  left_finger_joint:
+    has_velocity_limits: true
+    max_velocity: 0.15
+    has_acceleration_limits: true
+    max_acceleration: 1.0
+  right_finger_joint:
+    has_velocity_limits: true
+    max_velocity: 0.15
+    has_acceleration_limits: true
+    max_acceleration: 1.0

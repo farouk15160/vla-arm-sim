@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<!--
+  ros2_control description for the simulated cell.
+
+  Arm joints reuse ur_description's generated block so the interface names and
+  initial values stay in step with the UR package. The gripper joints are
+  declared here because they are ours.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:include filename="$(find ur_description)/urdf/inc/ur_joint_control.xacro"/>
+
+  <xacro:macro name="groot_arm_ros2_control" params="
+    name
+    tf_prefix
+    gripper_stroke:=0.04
+    initial_positions:=${dict(shoulder_pan_joint=0.0,shoulder_lift_joint=-1.57,elbow_joint=1.57,wrist_1_joint=-1.57,wrist_2_joint=-1.57,wrist_3_joint=0.0)}
+    ">
+
+    <ros2_control name="${name}" type="system">
+      <hardware>
+        <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+      </hardware>
+
+      <!-- 6 arm joints, position/velocity/effort command + state interfaces -->
+      <xacro:ur_joint_control_description
+        tf_prefix="${tf_prefix}"
+        initial_positions="${initial_positions}"/>
+
+      <!-- gripper: start open so the first grasp does not begin in collision -->
+      <xacro:macro name="finger_control" params="side">
+        <joint name="${tf_prefix}${side}_finger_joint">
+          <!-- Command range is the usable travel; the URDF joint limits sit a
+     few mm beyond it so commands never reach a mechanical stop. -->
+          <command_interface name="position">
+            <param name="min">0.0</param>
+            <param name="max">${gripper_stroke}</param>
+          </command_interface>
+          <state_interface name="position">
+            <param name="initial_value">${gripper_stroke}</param>
+          </state_interface>
+          <state_interface name="velocity">
+            <param name="initial_value">0.0</param>
+          </state_interface>
+          <state_interface name="effort">
+            <param name="initial_value">0.0</param>
+          </state_interface>
+        </joint>
+      </xacro:macro>
+
+      <xacro:finger_control side="left"/>
+      <xacro:finger_control side="right"/>
+
+    </ros2_control>
+  </xacro:macro>
+</robot>

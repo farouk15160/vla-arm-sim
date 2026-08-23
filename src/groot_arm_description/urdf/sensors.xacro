@@ -1,0 +1,72 @@
+<?xml version="1.0"?>
+<!--
+  Cameras for the VLA observation stream.
+
+  GR00T is trained on egocentric/third-person RGB. We provide two views:
+    * wrist camera  - mounted on the gripper palm, looks down the tool axis
+    * scene camera  - static over-the-shoulder view of the whole table
+
+  Gazebo camera convention: the optical axis is +x of the sensor link, +z up.
+  URDF tool frames point +z outward, so the wrist camera link carries a
+  -90 deg pitch to line the two up. `gz_frame_id` makes the published
+  CameraInfo/Image frame_id match the ROS TF frame name.
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro">
+
+  <xacro:macro name="rgb_camera" params="
+    name
+    parent
+    *origin
+    width:=640
+    height:=480
+    hfov:=1.2
+    update_rate:=30
+    near:=0.02
+    far:=8.0
+    ">
+
+    <joint name="${name}_joint" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${name}_link"/>
+      <xacro:insert_block name="origin"/>
+    </joint>
+
+    <link name="${name}_link">
+      <visual>
+        <geometry><box size="0.02 0.045 0.02"/></geometry>
+        <material name="camera_body"><color rgba="0.1 0.1 0.1 1.0"/></material>
+      </visual>
+      <inertial>
+        <mass value="0.02"/>
+        <inertia ixx="1e-6" ixy="0.0" ixz="0.0" iyy="1e-6" iyz="0.0" izz="1e-6"/>
+      </inertial>
+    </link>
+
+    <gazebo reference="${name}_link">
+      <sensor name="${name}" type="camera">
+        <topic>${name}/image_raw</topic>
+        <gz_frame_id>${name}_link</gz_frame_id>
+        <update_rate>${update_rate}</update_rate>
+        <always_on>1</always_on>
+        <visualize>false</visualize>
+        <camera>
+          <horizontal_fov>${hfov}</horizontal_fov>
+          <image>
+            <width>${width}</width>
+            <height>${height}</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>${near}</near>
+            <far>${far}</far>
+          </clip>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.005</stddev>
+          </noise>
+        </camera>
+      </sensor>
+    </gazebo>
+  </xacro:macro>
+</robot>
