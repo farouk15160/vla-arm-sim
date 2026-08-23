@@ -385,6 +385,7 @@ class ControlPanel(QWidget):
 
     def _refresh(self) -> None:
         self._refresh_status()
+        self._refresh_enabled()
         self._refresh_vla()
         self._refresh_marker()
 
@@ -455,7 +456,11 @@ class ControlPanel(QWidget):
     def _refresh_marker(self) -> None:
         pose = self.node.goal_pose
         available = self.node.go_marker_client.service_is_ready()
-        self.btn_go.setEnabled(available and not self._busy.locked())
+        self.btn_go.setEnabled(
+            available and not self._busy.locked() and not self._policy_armed())
+        self.btn_go.setToolTip(
+            "disable the policy first: it is driving the arm"
+            if self._policy_armed() else "")
         if pose is None:
             self.lbl_marker.setText("marker: waiting for /goal_marker …")
             return
@@ -464,10 +469,23 @@ class ControlPanel(QWidget):
             f"marker: x={p.x:+.3f}  y={p.y:+.3f}  z={p.z:+.3f}   (frame {pose.header.frame_id})")
         self.lbl_marker_status.setText(self.node.marker_status)
 
+    def _policy_armed(self) -> bool:
+        return bool(self.node.status.get("enabled", False))
+
     def _refresh_enabled(self) -> None:
-        idle = not self._busy.locked()
+        # Manual control and the policy both drive arm_controller. Letting both
+        # run means MoveIt gets preempted and reports CONTROL_FAILED, which
+        # looks like a bug rather than contention - so the manual controls are
+        # locked out while the policy is armed.
+        idle = not self._busy.locked() and not self._policy_armed()
+        reason = ""
+        if self._policy_armed():
+            reason = "disable the policy first: it is driving the arm"
+        elif self._busy.locked():
+            reason = "a motion is already running"
         for button in self.motion_buttons:
             button.setEnabled(idle)
+            button.setToolTip(reason)
 
     # ------------------------------------------------------------------ #
     # actions

@@ -28,6 +28,9 @@ from interactive_markers import InteractiveMarkerServer, MenuHandler
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile
+import json
+
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -57,6 +60,17 @@ class GoalMarkerNode(Node):
         self.tcp_frame = str(self.get_parameter("tcp_frame").value)
         self.auto_go = bool(self.get_parameter("auto_go").value)
         self.scale = float(self.get_parameter("marker_scale").value)
+
+        # The VLA policy streams trajectories straight to arm_controller. If it
+        # is armed while we plan, MoveIt's execution is preempted mid-motion and
+        # comes back as CONTROL_FAILED - two controllers fighting over one arm.
+        # Watch its status so we can refuse cleanly instead.
+        self._policy_armed = False
+        self.create_subscription(
+            String, "/groot_policy/status", self._on_policy_status,
+            QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                       history=QoSHistoryPolicy.KEEP_LAST),
+        )
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -171,6 +185,12 @@ class GoalMarkerNode(Node):
         self._server.applyChanges()
 
     # ------------------------------------------------------------------ #
+    def _on_policy_status(self, message: String) -> None:
+        try:
+            self._policy_armed = bool(json.loads(message.data).get("enabled", False))
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
     def _publish_pose(self) -> None:
         pose = self._marker_pose()
         if pose is None:
@@ -187,6 +207,12 @@ class GoalMarkerNode(Node):
         if pose is None:
             response.success = False
             response.message = "no marker pose available"
+            return response
+        if self._policy_armed:
+            response.success = False
+            response.message = (
+                "the VLA policy is armed and owns the arm; disable it first"
+            )
             return response
         if self._busy.locked():
             response.success = False
@@ -266,6 +292,12 @@ class GoalMarkerNode(Node):
         Refuses rather than queues: clicking "Move here" twice should not
         commit the arm to two motions in sequence.
         """
+        if self._policy_armed:
+            self._publish_status(
+                f"refused ({label}): the VLA policy is armed and owns the arm. "
+                "Disable it first, or the two fight and both fail."
+            )
+            return
         if not self._busy.acquire(blocking=False):
             self._publish_status(f"busy, ignoring: {label}")
             return

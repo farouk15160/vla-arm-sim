@@ -476,6 +476,37 @@ twist expires after `twist_hold_time` so a dead policy cannot leave it drifting.
   pattern matched the command line of the shell about to start that launch.
   Patterns now match executable paths and the script skips its own ancestry.
 
+## Running out of VRAM
+
+The card is shared with everything else on the desktop. A game, a browser with
+hardware acceleration, or a second model will take the memory the policy needs,
+and 6 GB does not leave much slack. Check before blaming the stack:
+
+```bash
+nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv
+```
+
+Both servers now handle a busy GPU rather than dying part way through loading:
+
+* **smolvla_server** falls back to CPU automatically, naming what is holding the
+  GPU. It still works — about 25 s per inference instead of 950 ms.
+* **openvla_server** checks free VRAM up front and either offloads layers to
+  CPU or exits immediately with an actionable message, instead of crashing
+  after 30 s of loading with a CUDA traceback.
+
+If you need the GPU back, close the other application, or run headless
+(`gazebo_gui:=false`) to save the renderer's share.
+
+## Who owns the arm
+
+The policy streams trajectories straight to `arm_controller`; MoveIt does too.
+If both run at once, MoveIt's execution is preempted and returns
+`CONTROL_FAILED`, which reads like a bug but is really contention.
+
+So manual control is **interlocked**: while the policy is armed, the goal
+marker refuses with a clear message and the panel greys out its motion buttons
+with a tooltip saying why. Disable the policy to drive the arm by hand.
+
 ## Troubleshooting
 
 **Motions fail with `MoveItErrorCode=-4` (CONTROL_FAILED), or you see

@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import subprocess
 import sys
 import time
 from typing import Any
@@ -60,7 +61,43 @@ except ImportError:  # running directly in the policy venv
 
 import zmq
 
+# Must be set before torch is imported. Expandable segments let the allocator
+# grow blocks instead of reserving fixed-size ones, which materially reduces
+# fragmentation when loading 7B of weights into a nearly-full card.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 ARM_DOF = 6
+# Weights need ~4.4 GB in NF4. Below this much free VRAM the model cannot be
+# resident and layers are offloaded to CPU instead.
+NF4_WEIGHTS_GIB = 4.4
+# Leave room for activations and the CUDA context.
+ACTIVATION_HEADROOM_GIB = 0.7
+
+
+def gpu_memory_gib() -> tuple[float, float]:
+    """(free, total) VRAM in GiB, read from the driver rather than torch.
+
+    torch.cuda.mem_get_info reports what the driver sees, so memory held by
+    OTHER processes - a game, a browser, another model - is accounted for.
+    """
+    import torch
+
+    free, total = torch.cuda.mem_get_info()
+    return free / 1024 ** 3, total / 1024 ** 3
+
+
+def describe_gpu_hogs() -> str:
+    """Name the processes holding VRAM, so the failure is actionable."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory,process_name",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return "\n".join(f"    {line}" for line in lines)
 
 
 class OpenVLAServer:
@@ -71,6 +108,7 @@ class OpenVLAServer:
         port: int = 5555,
         unnorm_key: str = "bridge_orig",
         load_in_4bit: bool = True,
+        device_map: str = "auto",
         action_horizon: int = 1,
         verbose: bool = True,
     ) -> None:
@@ -80,13 +118,52 @@ class OpenVLAServer:
         self._calls = 0
         self._running = True
 
+        # Decide before importing torch: once it binds the CUDA device,
+        # downstream libraries place tensors there whatever we ask for.
+        if device_map == "cpu":
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
         import torch
         from transformers import AutoModelForVision2Seq, AutoProcessor
 
         self.torch = torch
-        if not torch.cuda.is_available():
+        self.cpu_only = device_map == "cpu"
+        if not self.cpu_only and not torch.cuda.is_available():
+            print("[openvla] no CUDA device; falling back to CPU", flush=True)
+            self.cpu_only = True
+        if self.cpu_only:
+            # Quantisation is a GPU technique; on CPU we load bf16 weights,
+            # which needs ~14 GB of RAM and is very slow, but it does run.
+            print("[openvla] CPU mode: expect tens of seconds per inference", flush=True)
+            load_in_4bit = False
+
+        if self.cpu_only:
+            free_gib = total_gib = 0.0
+        else:
+            free_gib, total_gib = gpu_memory_gib()
+        if not self.cpu_only:
+            print(
+                f"[openvla] GPU: {free_gib:.2f} GiB free of {total_gib:.2f} GiB",
+                flush=True,
+            )
+
+        needed = NF4_WEIGHTS_GIB + ACTIVATION_HEADROOM_GIB if load_in_4bit else 14.0
+        if not self.cpu_only and free_gib < needed:
+            hogs = describe_gpu_hogs()
+            print(
+                f"[openvla] WARNING: {free_gib:.2f} GiB free, ~{needed:.1f} GiB wanted.\n"
+                f"[openvla] Layers that do not fit will run on the CPU, which is\n"
+                f"[openvla] MUCH slower. Free VRAM for full speed - current users:\n"
+                f"{hogs or '    (could not read nvidia-smi)'}",
+                flush=True,
+            )
+        if not self.cpu_only and free_gib < 1.2:
             raise SystemExit(
-                "OpenVLA needs a CUDA GPU. Use smolvla_server (which runs on CPU) instead."
+                f"[openvla] only {free_gib:.2f} GiB of VRAM is free; even the CPU-offload\n"
+                f"path needs roughly 1.2 GiB for the vision tower and activations.\n"
+                f"Close whatever is holding the GPU, or run smolvla_server instead\n"
+                f"(0.9 GiB), or pass --device-map cpu to run entirely on the CPU.\n"
+                f"Current GPU users:\n{hogs or '    (could not read nvidia-smi)'}"
             )
 
         print(f"[openvla] loading {model_path} (4bit={load_in_4bit}) ...", flush=True)
@@ -102,19 +179,50 @@ class OpenVLAServer:
 
             # NF4 with double quantisation: the smallest footprint the
             # checkpoint supports without a noticeable accuracy cliff.
+            # fp32_cpu_offload is what permits accelerate to place layers that
+            # do not fit on the CPU rather than raising OutOfMemoryError.
             kwargs["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
+                llm_int8_enable_fp32_cpu_offload=True,
             )
+            # Hand accelerate an explicit budget instead of letting it assume
+            # the whole card is ours. Without this it fills VRAM and dies part
+            # way through loading shard 3 of 3.
+            budget = max(free_gib - ACTIVATION_HEADROOM_GIB, 0.5)
+            kwargs["device_map"] = "auto"
+            kwargs["max_memory"] = {0: f"{budget:.2f}GiB", "cpu": "16GiB"}
+        elif self.cpu_only:
+            kwargs["device_map"] = {"": "cpu"}
         else:
             kwargs["device_map"] = {"": 0}
 
-        self.model = AutoModelForVision2Seq.from_pretrained(model_path, **kwargs)
-        if not load_in_4bit:
+        try:
+            self.model = AutoModelForVision2Seq.from_pretrained(model_path, **kwargs)
+        except torch.OutOfMemoryError as exc:
+            raise SystemExit(
+                f"[openvla] out of VRAM while loading: {exc}\n"
+                f"Free the GPU, or use smolvla_server (0.9 GiB).\n"
+                f"Current GPU users:\n{describe_gpu_hogs()}"
+            ) from exc
+
+        if not load_in_4bit and not self.cpu_only:
             self.model = self.model.to("cuda:0")
         self.model.eval()
+
+        # Report where the model actually ended up: silently running half the
+        # layers on the CPU explains an otherwise baffling 10x slowdown.
+        placement = getattr(self.model, "hf_device_map", None)
+        if isinstance(placement, dict):
+            on_cpu = sum(1 for d in placement.values() if d in ("cpu", "disk"))
+            if on_cpu:
+                print(
+                    f"[openvla] {on_cpu}/{len(placement)} module groups offloaded to CPU "
+                    f"- expect much slower inference",
+                    flush=True,
+                )
 
         available = self._available_unnorm_keys()
         if available and self.unnorm_key not in available:
@@ -126,9 +234,10 @@ class OpenVLAServer:
             )
             self.unnorm_key = fallback
 
-        used = torch.cuda.memory_allocated() / 1e9
-        total = torch.cuda.get_device_properties(0).total_memory / 1e9
-        print(f"[openvla] VRAM {used:.2f} / {total:.1f} GB", flush=True)
+        if not self.cpu_only:
+            used = torch.cuda.memory_allocated() / 1e9
+            total = torch.cuda.get_device_properties(0).total_memory / 1e9
+            print(f"[openvla] VRAM {used:.2f} / {total:.1f} GB", flush=True)
         print(f"[openvla] ready. unnorm_key={self.unnorm_key}", flush=True)
 
         self._context = zmq.Context()
@@ -166,7 +275,8 @@ class OpenVLAServer:
         instruction = (task or "pick up the object").lower().strip()
         prompt = f"In: What action should the robot take to {instruction}?\nOut:"
 
-        inputs = self.processor(prompt, image).to("cuda:0", dtype=self.torch.bfloat16)
+        device = "cpu" if self.cpu_only else "cuda:0"
+        inputs = self.processor(prompt, image).to(device, dtype=self.torch.bfloat16)
         with self.torch.inference_mode():
             action = self.model.predict_action(
                 **inputs, unnorm_key=self.unnorm_key, do_sample=False
@@ -257,6 +367,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--no-4bit", action="store_true",
                         help="load in bf16 (needs ~14 GB VRAM)")
     parser.add_argument("--action-horizon", type=int, default=1)
+    parser.add_argument("--device-map", default="auto", choices=["auto", "cpu"],
+                        help="'cpu' runs entirely on CPU when the GPU is busy")
     parser.add_argument("--list-unnorm-keys", action="store_true",
                         help="print the checkpoint's dataset keys and exit")
     parser.add_argument("--quiet", action="store_true")
@@ -269,6 +381,7 @@ def main(argv: list[str] | None = None) -> None:
         unnorm_key=args.unnorm_key,
         load_in_4bit=not args.no_4bit,
         action_horizon=args.action_horizon,
+        device_map=args.device_map,
         verbose=not args.quiet,
     )
     if args.list_unnorm_keys:

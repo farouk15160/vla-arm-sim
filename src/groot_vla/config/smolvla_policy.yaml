@@ -6,9 +6,11 @@
     #       src/groot_vla/groot_vla/smolvla_server.py --port 5555
     policy_host: "127.0.0.1"
     policy_port: 5555
-    # SmolVLA needs ~0.9-1.4 s per forward pass on an RTX 2060, so the client
-    # must not give up early.
-    policy_timeout_ms: 30000
+    # ~0.9-1.4 s per forward pass on an RTX 2060. Sized far larger than that
+    # because smolvla_server falls back to CPU when the GPU is busy, where a
+    # forward pass measured ~25 s. A timeout tuned to the GPU case would turn
+    # that graceful fallback into a stream of client-side timeouts.
+    policy_timeout_ms: 120000
     api_token: ""
 
     instruction: "pick up the red cube and place it in the tray"

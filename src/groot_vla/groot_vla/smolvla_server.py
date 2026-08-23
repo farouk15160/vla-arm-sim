@@ -47,6 +47,46 @@ except ImportError:  # running outside the ROS package
 import zmq
 
 ARM_DOF = 6
+# Weights are ~0.9 GiB; the rest is activations and the CUDA context.
+MIN_FREE_VRAM_GIB = 1.5
+
+
+def free_vram_gib() -> float | None:
+    """Free VRAM in GiB, read WITHOUT importing torch.
+
+    This has to work before torch is imported. Once torch initialises it binds
+    the CUDA device, and libraries downstream (transformers, LeRobot) then
+    place tensors there regardless of any device we ask for - which is exactly
+    how a 'fall back to CPU' path still dies with a CUDA OOM.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        return int(result.stdout.strip().splitlines()[0]) / 1024.0
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+def describe_gpu_hogs() -> str:
+    """Name the processes holding VRAM, so the fallback is explicable."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory,process_name",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "    (could not read nvidia-smi)"
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return "\n".join(f"    {line}" for line in lines) or "    (none reported)"
 
 
 # --------------------------------------------------------------------------- #
@@ -129,6 +169,25 @@ class SmolVLAServer:
         self._running = True
         self._latencies: list[float] = []
 
+        # Decide CPU-vs-GPU BEFORE torch is imported. A full GPU is as fatal as
+        # a missing one, and the failure is far more confusing: loading dies
+        # part way through with a CUDA OOM. SmolVLA is only 450M, so CPU is a
+        # genuinely usable fallback - a few seconds per inference, not a crash.
+        if device == "cuda":
+            free_gib = free_vram_gib()
+            if free_gib is not None and free_gib < MIN_FREE_VRAM_GIB:
+                print(
+                    f"[smolvla] only {free_gib:.2f} GiB VRAM free, need about "
+                    f"{MIN_FREE_VRAM_GIB:.1f} GiB. Falling back to CPU (slower).\n"
+                    f"[smolvla] GPU is currently used by:\n{describe_gpu_hogs()}",
+                    flush=True,
+                )
+                device = "cpu"
+        if device == "cpu":
+            # Hiding the device is the only reliable way to keep downstream
+            # libraries off the GPU; asking them politely is not enough.
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
         import torch
 
         self.torch = torch
@@ -144,8 +203,15 @@ class SmolVLAServer:
         self.policy = SmolVLAPolicy.from_pretrained(model_path)
         self.policy.to(self.device)
         self.policy.eval()
+        # The saved processor config hard-codes the device it was exported with
+        # (cuda). Instantiating it on a CPU-only run fails outright, so the
+        # device step is overridden to whatever we actually resolved to.
+        device_override = {"device_processor": {"device": str(self.device)}}
         self.preprocessor, self.postprocessor = make_pre_post_processors(
-            policy_cfg=self.policy.config, pretrained_path=model_path
+            policy_cfg=self.policy.config,
+            pretrained_path=model_path,
+            preprocessor_overrides=device_override,
+            postprocessor_overrides=device_override,
         )
 
         # The checkpoint declares which camera keys and state width it was
@@ -160,7 +226,7 @@ class SmolVLAServer:
         action_feature = self.policy.config.output_features.get("action")
         self.action_dim = int(np.prod(action_feature.shape)) if action_feature is not None else 7
 
-        if torch.cuda.is_available() and device == "cuda":
+        if device == "cuda" and torch.cuda.is_available():
             used = torch.cuda.memory_allocated() / 1e9
             total = torch.cuda.get_device_properties(0).total_memory / 1e9
             print(f"[smolvla] VRAM {used:.2f} / {total:.1f} GB", flush=True)
