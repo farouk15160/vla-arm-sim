@@ -143,8 +143,16 @@ class ObservationBuilder:
         :param joint_positions: joint name -> position (rad, or m for fingers)
         :param instruction: the natural-language task
         """
+        # Emit cameras in the order declared in `cameras`, NOT dict order.
+        # The images dict is populated by subscription callbacks, so its order
+        # depends on which camera happened to publish first - and a server that
+        # maps our views onto its own image slots positionally would then swap
+        # wrist and scene between runs, silently breaking the correspondence
+        # with what the policy was trained on.
         video = {
-            key: image[np.newaxis, np.newaxis, ...] for key, image in images.items()
+            spec.modality_key: images[spec.modality_key][np.newaxis, np.newaxis, ...]
+            for spec in self.cameras
+            if spec.modality_key in images
         }
 
         state: dict[str, np.ndarray] = {}

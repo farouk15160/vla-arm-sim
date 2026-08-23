@@ -1,23 +1,23 @@
-"""Convert recorded episodes into a LeRobot dataset that GR00T can fine-tune on.
+"""Convert recorded episodes into a LeRobot dataset for fine-tuning.
 
-Reads the PNG + JSONL episodes written by ``episode_recorder`` and emits the
-LeRobot v2.1 layout Isaac-GR00T expects:
+Reads the PNG + JSONL episodes written by `episode_recorder` and builds a
+dataset with LeRobot's own `LeRobotDataset` API rather than writing the layout
+by hand.
 
-    <out>/meta/info.json
-    <out>/meta/tasks.jsonl
-    <out>/meta/episodes.jsonl
-    <out>/meta/modality.json          <- GR00T-specific, maps columns to modalities
-    <out>/data/chunk-000/episode_000000.parquet
-    <out>/videos/chunk-000/observation.images.<cam>/episode_000000.mp4
+That choice is deliberate. LeRobot 0.4.x expects dataset format **v3.0**, which
+consolidates many episodes per parquet/mp4 file and keeps episode metadata as
+parquet with per-episode statistics. Hand-writing it is easy to get subtly
+wrong, and the failure mode is a training run that starts and then reads
+garbage. Their builder also computes the normalisation statistics, which the
+policy needs and which cannot be guessed.
 
-Then:
-    python scripts/gr00t_finetune.py \
-        --dataset-path <out> --embodiment-tag NEW_EMBODIMENT \
-        --data-config <your config>
+(LeRobot ships a v2.1 -> v3.0 converter, but it resolves the dataset through the
+HuggingFace hub and cannot convert a purely local one.)
 
-Extra dependencies, needed only here and not by the ROS runtime:
-    pip install pandas pyarrow
-    sudo apt install ffmpeg
+Run it with the policy venv, which has torch, pandas and lerobot:
+
+    ~/vla_venv/bin/python export_lerobot.py \\
+        --input ~/groot_episodes --output ~/groot_lerobot
 """
 
 from __future__ import annotations
@@ -25,192 +25,151 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
-CHUNK = "chunk-000"
+import numpy as np
+
+# State is the SIX arm joints only; action is those six plus the gripper.
+#
+# The asymmetry is deliberate. lerobot/smolvla_base declares a 6-dimensional
+# observation.state, and fine-tuning from it keeps that declaration while taking
+# the action width from the dataset. Writing a 7-dim state produces a checkpoint
+# whose config says state [6] and action [7], which loads fine and then dies at
+# inference with "The size of tensor a (6) must match the size of tensor b (7)".
+# Six in, seven out matches the base model and still gives the policy gripper
+# control, which the base checkpoint does not have.
+STATE_DIM = 6
+ACTION_DIM = 7
 
 
-def require(module: str, hint: str) -> None:
+def find_ffmpeg() -> str | None:
+    """Locate ffmpeg, preferring the system copy then imageio-ffmpeg's.
+
+    LeRobot encodes the videos itself but needs a binary available. The bundled
+    fallback matters because installing ffmpeg system-wide needs root, while the
+    venv can pip-install imageio-ffmpeg without it.
+    """
+    system = shutil.which("ffmpeg")
+    if system:
+        return system
     try:
-        __import__(module)
-    except ImportError:
-        raise SystemExit(f"missing dependency {module!r}. Install it with: {hint}")
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, RuntimeError):
+        return None
 
 
-def encode_video(frames_dir: Path, output: Path, fps: float) -> None:
-    """PNG sequence -> H.264 mp4. GR00T's video backend decodes yuv420p."""
-    if shutil.which("ffmpeg") is None:
-        raise SystemExit("ffmpeg not found. Install it with: sudo apt install ffmpeg")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    command = [
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-framerate", str(fps),
-        "-i", str(frames_dir / "frame_%06d.png"),
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        # yuv420p needs even dimensions; 224x224 is fine but a custom size
-        # might not be.
-        "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-        "-crf", "20",
-        str(output),
+def read_episode(directory: Path) -> tuple[dict, list[dict]]:
+    metadata = json.loads((directory / "meta.json").read_text())
+    rows = [
+        json.loads(line)
+        for line in (directory / "frames.jsonl").read_text().splitlines()
+        if line.strip()
     ]
-    subprocess.run(command, check=True)
+    return metadata, rows
 
 
-def convert(input_dir: Path, output_dir: Path, robot_type: str = "ur5e_parallel_gripper") -> None:
-    import pandas as pd
+def load_frame(path: Path) -> np.ndarray:
+    from PIL import Image
+
+    return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+
+
+def convert(input_dir: Path, output_dir: Path, repo_id: str, robot_type: str) -> None:
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     episodes = sorted(p for p in input_dir.glob("episode_*") if p.is_dir())
     if not episodes:
         raise SystemExit(f"no episode_* directories under {input_dir}")
 
-    (output_dir / "meta").mkdir(parents=True, exist_ok=True)
-    (output_dir / "data" / CHUNK).mkdir(parents=True, exist_ok=True)
+    first_meta, _ = read_episode(episodes[0])
+    fps = int(round(float(first_meta["fps"])))
+    cameras = list(first_meta["cameras"])
+    height, width = int(first_meta["image_size"][1]), int(first_meta["image_size"][0])
 
-    tasks: dict[str, int] = {}
-    episode_records: list[dict] = []
-    total_frames = 0
-    cameras: list[str] = []
-    fps = 20.0
+    arm_joints = list(first_meta["arm_joints"])
+    action_names = [*arm_joints, first_meta["gripper_joint"]]
+    features = {
+        "observation.state": {"dtype": "float32", "shape": (STATE_DIM,), "names": arm_joints},
+        "action": {"dtype": "float32", "shape": (ACTION_DIM,), "names": action_names},
+    }
+    for camera in cameras:
+        features[f"observation.images.{camera}"] = {
+            "dtype": "video",
+            "shape": (height, width, 3),
+            "names": ["height", "width", "channel"],
+        }
 
-    for new_index, episode in enumerate(episodes):
-        metadata = json.loads((episode / "meta.json").read_text())
-        fps = float(metadata["fps"])
-        cameras = list(metadata["cameras"])
-        task = metadata["task"]
-        task_index = tasks.setdefault(task, len(tasks))
+    if output_dir.exists():
+        raise SystemExit(
+            f"{output_dir} already exists. Remove it or choose another --output; "
+            "LeRobot refuses to create a dataset over an existing directory."
+        )
 
-        rows = [json.loads(line) for line in (episode / "frames.jsonl").read_text().splitlines() if line]
-        if not rows:
-            print(f"skipping empty episode {episode.name}", file=sys.stderr)
+    dataset = LeRobotDataset.create(
+        repo_id=repo_id, fps=fps, features=features,
+        root=output_dir, robot_type=robot_type, use_videos=True,
+    )
+
+    total = 0
+    for episode in episodes:
+        metadata, rows = read_episode(episode)
+        if len(rows) < 2:
+            print(f"skipping {episode.name}: too few frames", file=sys.stderr)
             continue
+        task = metadata["task"]
 
-        frame = pd.DataFrame(
-            {
-                "observation.state": [
-                    r["state.single_arm"] + r["state.gripper"] for r in rows
-                ],
-                "action": [r["action.single_arm"] + r["action.gripper"] for r in rows],
-                "timestamp": [r["timestamp"] for r in rows],
-                "frame_index": list(range(len(rows))),
-                "episode_index": [new_index] * len(rows),
-                "index": list(range(total_frames, total_frames + len(rows))),
-                "task_index": [task_index] * len(rows),
+        for row in rows:
+            frame = {
+                "observation.state": np.asarray(row["state.single_arm"], dtype=np.float32),
+                "action": np.asarray(
+                    row["action.single_arm"] + row["action.gripper"], dtype=np.float32),
+                "task": task,
             }
-        )
-        frame.to_parquet(
-            output_dir / "data" / CHUNK / f"episode_{new_index:06d}.parquet", index=False
-        )
+            for camera in cameras:
+                frame[f"observation.images.{camera}"] = load_frame(
+                    episode / camera / f"frame_{row['frame_index']:06d}.png")
+            dataset.add_frame(frame)
 
-        for camera in cameras:
-            encode_video(
-                episode / camera,
-                output_dir / "videos" / CHUNK / f"observation.images.{camera}"
-                / f"episode_{new_index:06d}.mp4",
-                fps,
-            )
+        dataset.save_episode()
+        total += len(rows)
+        print(f"converted {episode.name} ({len(rows)} frames)")
 
-        episode_records.append(
-            {"episode_index": new_index, "tasks": [task], "length": len(rows)}
-        )
-        total_frames += len(rows)
-        print(f"converted {episode.name} -> episode_{new_index:06d} ({len(rows)} frames)")
-
-    state_dim = 7  # 6 arm joints + 1 normalised gripper
-
-    info = {
-        "codebase_version": "v2.1",
-        "robot_type": robot_type,
-        "total_episodes": len(episode_records),
-        "total_frames": total_frames,
-        "total_tasks": len(tasks),
-        "total_videos": len(episode_records) * len(cameras),
-        "total_chunks": 1,
-        "chunks_size": 1000,
-        "fps": fps,
-        "splits": {"train": f"0:{len(episode_records)}"},
-        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
-        "features": {
-            "observation.state": {
-                "dtype": "float32",
-                "shape": [state_dim],
-                "names": {"motors": [f"motor_{i}" for i in range(state_dim)]},
-            },
-            "action": {
-                "dtype": "float32",
-                "shape": [state_dim],
-                "names": {"motors": [f"motor_{i}" for i in range(state_dim)]},
-            },
-            "timestamp": {"dtype": "float32", "shape": [1], "names": None},
-            "frame_index": {"dtype": "int64", "shape": [1], "names": None},
-            "episode_index": {"dtype": "int64", "shape": [1], "names": None},
-            "index": {"dtype": "int64", "shape": [1], "names": None},
-            "task_index": {"dtype": "int64", "shape": [1], "names": None},
-            **{
-                f"observation.images.{camera}": {
-                    "dtype": "video",
-                    "shape": [224, 224, 3],
-                    "names": ["height", "width", "channel"],
-                    "info": {
-                        "video.fps": fps,
-                        "video.codec": "h264",
-                        "video.pix_fmt": "yuv420p",
-                        "video.is_depth_map": False,
-                        "has_audio": False,
-                    },
-                }
-                for camera in cameras
-            },
-        },
-    }
-    (output_dir / "meta" / "info.json").write_text(json.dumps(info, indent=2))
-
-    with (output_dir / "meta" / "tasks.jsonl").open("w") as handle:
-        for task, index in sorted(tasks.items(), key=lambda item: item[1]):
-            handle.write(json.dumps({"task_index": index, "task": task}) + "\n")
-
-    with (output_dir / "meta" / "episodes.jsonl").open("w") as handle:
-        for record in episode_records:
-            handle.write(json.dumps(record) + "\n")
-
-    # GR00T reads modality.json to slice the flat state/action vectors into
-    # named modalities; the index ranges must match the column layout above.
-    modality = {
-        "state": {
-            "single_arm": {"start": 0, "end": 6},
-            "gripper": {"start": 6, "end": 7},
-        },
-        "action": {
-            "single_arm": {"start": 0, "end": 6},
-            "gripper": {"start": 6, "end": 7},
-        },
-        "video": {camera: {"original_key": f"observation.images.{camera}"} for camera in cameras},
-        "annotation": {"human.task_description": {"original_key": "task_index"}},
-    }
-    (output_dir / "meta" / "modality.json").write_text(json.dumps(modality, indent=2))
-
+    print(f"\ndone: {len(episodes)} episodes, {total} frames -> {output_dir}")
     print(
-        f"\ndone: {len(episode_records)} episodes, {total_frames} frames -> {output_dir}\n"
-        f"fine-tune with:\n"
-        f"  python scripts/gr00t_finetune.py --dataset-path {output_dir} "
-        f"--embodiment-tag NEW_EMBODIMENT"
+        "\nfine-tune with:\n"
+        "  ~/vla_venv/bin/lerobot-train \\\n"
+        "      --policy.path=lerobot/smolvla_base \\\n"
+        "      --policy.repo_id=local/smolvla_ur5e --policy.push_to_hub=false \\\n"
+        f"      --dataset.repo_id={repo_id} --dataset.root={output_dir} \\\n"
+        "      --batch_size=4 --steps=20000 --output_dir=~/smolvla_ur5e"
     )
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--input", required=True, type=Path, help="episode_recorder output_dir")
-    parser.add_argument("--output", required=True, type=Path, help="LeRobot dataset destination")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--input", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--repo-id", default="local/groot_ur5e",
+                        help="dataset identifier; only a name for a local dataset")
     parser.add_argument("--robot-type", default="ur5e_parallel_gripper")
     args, _unknown = parser.parse_known_args(argv)
 
-    require("pandas", "pip install pandas")
-    require("pyarrow", "pip install pyarrow")
-    convert(args.input.expanduser(), args.output.expanduser(), args.robot_type)
+    try:
+        import lerobot  # noqa: F401
+    except ImportError:
+        raise SystemExit(
+            "lerobot is not importable. Run this with the policy venv:\n"
+            "    ~/vla_venv/bin/python export_lerobot.py --input ... --output ...")
+    if find_ffmpeg() is None:
+        raise SystemExit(
+            "No ffmpeg available. Install it system-wide (sudo apt install ffmpeg) "
+            "or, without root:\n    ~/vla_venv/bin/pip install imageio-ffmpeg")
+
+    convert(args.input.expanduser(), args.output.expanduser(), args.repo_id, args.robot_type)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,7 @@ setup(
             "episode_recorder = groot_vla.episode_recorder:main",
             "export_lerobot = groot_vla.export_lerobot:main",
             "scene_reset = groot_vla.scene_reset:main",
+            "collect_demos = groot_vla.collect_demos:main",
             "world_publisher = groot_vla.world_publisher:main",
             "goal_marker = groot_vla.goal_marker:main",
             "control_gui = groot_vla.control_gui:main",

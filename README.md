@@ -306,42 +306,84 @@ positive-feedback loop and stopped the arm at the box edge.
 
 ---
 
-## Collecting data for fine-tuning
+## Fine-tuning SmolVLA on this cell
 
-Zero-shot GR00T on a UR5e with a custom gripper is an out-of-distribution
-embodiment. Expect poor results without post-training.
+Zero-shot VLAs flail here because a UR5e with this gripper is an unseen
+embodiment. Fine-tuning is the fix, and the demonstrations can be **generated**
+rather than teleoperated, because the scripted pick-and-place already succeeds.
+
+### 1. Collect demonstrations
 
 ```bash
-ros2 run groot_vla episode_recorder --ros-args -p output_dir:=~/groot_episodes
-ros2 service call /episode_recorder/start_episode std_srvs/srv/Trigger
-#   ... drive the arm: RViz, pick_place_demo, or teleop ...
-ros2 service call /episode_recorder/stop_episode std_srvs/srv/Trigger
+# terminal 1: simulator
+ros2 launch groot_arm_bringup system.launch.py policy:=none gazebo_gui:=false
 
-# convert to a LeRobot dataset (needs pandas, pyarrow, ffmpeg)
-ros2 run groot_vla export_lerobot --input ~/groot_episodes --output ~/groot_lerobot
+# terminal 2: recorder
+ros2 run groot_vla episode_recorder --ros-args \
+    -p output_dir:=~/groot_episodes -p fps:=10.0 -p use_sim_time:=true
+
+# terminal 3: drive it
+ros2 run groot_vla collect_demos --ros-args -p episodes:=40 -p use_sim_time:=true
 ```
 
-The exporter writes `meta/modality.json` alongside the LeRobot v2.1 layout —
-GR00T uses it to slice the flat state/action vectors into named modalities;
-LeRobot ignores it harmlessly.
+`collect_demos` resets the scene with jittered cube positions, reads where the
+cubes *actually* landed, records, runs the same `pick_place_sequence` the
+standalone demo uses, and **discards any episode that fails** - a dataset
+containing failures teaches the policy to fail. The jitter is what stops the
+model memorising a single trajectory.
 
-Fine-tune SmolVLA on what you recorded, then serve the result:
+About 16 MB and 15 s per episode at 10 fps.
+
+### 2. Convert to a LeRobot dataset
 
 ```bash
-~/vla_venv/bin/python -m lerobot.scripts.lerobot_train \
+~/vla_venv/bin/python src/groot_vla/groot_vla/export_lerobot.py \
+    --input ~/groot_episodes --output ~/groot_lerobot
+```
+
+Built through LeRobot's own `LeRobotDataset` API, which computes the
+normalisation statistics and writes format v3.0 correctly. (Their v2.1 to v3.0
+converter resolves datasets through the HuggingFace hub and cannot convert a
+local one.)
+
+### 3. Train
+
+```bash
+~/vla_venv/bin/lerobot-train \
     --policy.path=lerobot/smolvla_base \
-    --dataset.repo_id=local/groot_lerobot \
-    --dataset.root=~/groot_lerobot \
-    --batch_size=8 --steps=20000 --output_dir=~/smolvla_ur5e
-
-~/vla_venv/bin/python src/groot_vla/groot_vla/smolvla_server.py \
-    --model-path ~/smolvla_ur5e/checkpoints/last/pretrained_model --port 5555
+    --policy.repo_id=local/smolvla_ur5e --policy.push_to_hub=false \
+    --dataset.repo_id=local/groot_ur5e --dataset.root=~/groot_lerobot \
+    --rename_map='{"observation.images.wrist_view": "observation.images.camera1", "observation.images.ego_view": "observation.images.camera2"}' \
+    --batch_size=4 --steps=20000 --output_dir=~/smolvla_ur5e \
+    --policy.device=cuda --wandb.enable=false
 ```
 
-Batch size 8 is sized for 6 GB; raise it if you train elsewhere. A fine-tuned
-checkpoint carries 7-dim state/action, so the gripper works too.
+`--rename_map` is required: the checkpoint declares `camera1/2/3` while the
+dataset uses readable names.
 
----
+Measured on the 6 GB RTX 2060 at batch size 2: **3.7 GB VRAM**, ~0.8 s/step,
+**100M of 450M parameters trainable** - SmolVLA freezes the vision encoder and
+trains only the action expert by default, which is what makes this fit.
+
+### 4. Serve the result
+
+```bash
+ros2 launch groot_arm_bringup system.launch.py policy:=smolvla \
+    model_path:=~/smolvla_ur5e/checkpoints/last/pretrained_model
+```
+
+A fine-tuned checkpoint has **7-dim actions** (6 joints + gripper) where the
+base model has 6 and cannot grasp at all.
+
+### State is 6-dim, actions are 7-dim
+
+Not a typo. `lerobot/smolvla_base` declares a 6-dimensional `observation.state`,
+and fine-tuning from it keeps that declaration while taking the action width
+from the dataset. Writing a 7-dim state yields a checkpoint whose config says
+state `[6]` and action `[7]`; it loads happily and then dies on the first
+inference with *"The size of tensor a (6) must match the size of tensor b (7)"*.
+So the exporter writes the six arm joints as state, and the six joints plus
+gripper as action.
 
 ## Packages
 

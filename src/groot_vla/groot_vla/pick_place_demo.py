@@ -36,6 +36,60 @@ def world_to_base(xyz: tuple[float, float, float]) -> tuple[float, float, float]
     return (xyz[0], xyz[1], xyz[2] - PEDESTAL_HEIGHT)
 
 
+def pick_place_sequence(
+    moveit: MoveItHelper,
+    object_world: tuple[float, float, float],
+    tray_world: tuple[float, float, float] = TRAY_XYZ,
+    approach_height: float = 0.12,
+    grasp_clearance: float = 0.012,
+    on_step=None,
+) -> None:
+    """Run the full pick-and-place. Raises MoveItError on any failed step.
+
+    Extracted so demonstration collection (collect_demos) drives exactly the
+    same motion the standalone demo does - a dataset recorded from a different
+    code path would be quietly training on different behaviour.
+    """
+    x, y, z = world_to_base(object_world)
+    yaw = math.atan2(y, x)
+    grasp_z = z + grasp_clearance
+    approach_z = grasp_z + approach_height
+
+    tray_x, tray_y, tray_z = world_to_base(tray_world)
+    place_z = tray_z + 0.04
+    tray_yaw = math.atan2(tray_y, tray_x)
+
+    steps = (
+        ("open gripper", lambda: moveit.open_gripper()),
+        ("move above cube", lambda: moveit.move_to_pose(make_pose(x, y, approach_z, yaw=yaw))),
+        ("descend to grasp", lambda: moveit.cartesian_move([make_pose(x, y, grasp_z, yaw=yaw)])),
+        ("close gripper", lambda: moveit.close_gripper()),
+        ("lift", lambda: moveit.cartesian_move([make_pose(x, y, approach_z, yaw=yaw)])),
+        ("move above tray", lambda: moveit.move_to_pose(
+            make_pose(tray_x, tray_y, approach_z, yaw=tray_yaw))),
+        ("lower into tray", lambda: moveit.cartesian_move(
+            [make_pose(tray_x, tray_y, place_z, yaw=tray_yaw)])),
+        ("release", lambda: moveit.open_gripper()),
+        ("retreat", lambda: moveit.cartesian_move(
+            [make_pose(tray_x, tray_y, approach_z, yaw=tray_yaw)])),
+        ("home", lambda: moveit.move_to_joints(HOME_JOINTS)),
+    )
+    for index, (label, action) in enumerate(steps, start=1):
+        if on_step:
+            on_step(index, len(steps), label)
+        action()
+
+
+HOME_JOINTS = {
+    "shoulder_pan_joint": 0.0,
+    "shoulder_lift_joint": -1.5708,
+    "elbow_joint": 1.5708,
+    "wrist_1_joint": -1.5708,
+    "wrist_2_joint": -1.5708,
+    "wrist_3_joint": 0.0,
+}
+
+
 class PickPlaceDemo(Node):
     def __init__(self) -> None:
         super().__init__("pick_place_demo")
@@ -67,49 +121,20 @@ class PickPlaceDemo(Node):
         self.get_logger().info("registering table geometry with the planner...")
         self.moveit.add_default_scene()
 
-        x, y, z = world_to_base(self.object_world)
-        grasp_z = z + self.grasp_clearance
-        approach_z = grasp_z + self.approach_height
-        # Yaw the wrist to align the fingers across the cube's short axis.
-        yaw = math.atan2(y, x)
+        def report(index: int, total: int, label: str) -> None:
+            self.get_logger().info(f"[{index}/{total}] {label}")
 
-        tray_x, tray_y, tray_z = world_to_base(TRAY_XYZ)
-        place_z = tray_z + 0.04
-        tray_yaw = math.atan2(tray_y, tray_x)
-
-        steps = (
-            ("open gripper", lambda: self.moveit.open_gripper()),
-            ("move above cube", lambda: self.moveit.move_to_pose(
-                make_pose(x, y, approach_z, yaw=yaw))),
-            ("descend to grasp", lambda: self.moveit.cartesian_move(
-                [make_pose(x, y, grasp_z, yaw=yaw)])),
-            ("close gripper", lambda: self.moveit.close_gripper()),
-            ("lift", lambda: self.moveit.cartesian_move(
-                [make_pose(x, y, approach_z, yaw=yaw)])),
-            ("move above tray", lambda: self.moveit.move_to_pose(
-                make_pose(tray_x, tray_y, approach_z, yaw=tray_yaw))),
-            ("lower into tray", lambda: self.moveit.cartesian_move(
-                [make_pose(tray_x, tray_y, place_z, yaw=tray_yaw)])),
-            ("release", lambda: self.moveit.open_gripper()),
-            ("retreat", lambda: self.moveit.cartesian_move(
-                [make_pose(tray_x, tray_y, approach_z, yaw=tray_yaw)])),
-            ("home", lambda: self.moveit.move_to_joints({
-                "shoulder_pan_joint": 0.0,
-                "shoulder_lift_joint": -1.5708,
-                "elbow_joint": 1.5708,
-                "wrist_1_joint": -1.5708,
-                "wrist_2_joint": -1.5708,
-                "wrist_3_joint": 0.0,
-            })),
-        )
-
-        for index, (label, action) in enumerate(steps, start=1):
-            self.get_logger().info(f"[{index}/{len(steps)}] {label}")
-            try:
-                action()
-            except MoveItError as exc:
-                self.get_logger().error(f"step {label!r} failed: {exc}")
-                return 1
+        try:
+            pick_place_sequence(
+                self.moveit,
+                self.object_world,
+                approach_height=self.approach_height,
+                grasp_clearance=self.grasp_clearance,
+                on_step=report,
+            )
+        except MoveItError as exc:
+            self.get_logger().error(f"pick and place failed: {exc}")
+            return 1
         self.get_logger().info("pick and place complete")
         return 0
 

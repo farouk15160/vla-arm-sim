@@ -60,6 +60,39 @@ def set_model_pose(name: str, xyz: tuple[float, float, float], world: str = WORL
     return True
 
 
+def read_model_poses(world: str = WORLD, timeout: float = 3.0) -> dict[str, tuple[float, float, float]]:
+    """Read every model's live pose out of Gazebo.
+
+    Needed after --randomize: the cubes are no longer where CUBE_POSES says,
+    and a demonstration collected against the nominal position would grasp thin
+    air. Parsed from the CLI rather than a ROS subscription because
+    /world/<name>/dynamic_pose/info is not bridged by default.
+    """
+    try:
+        result = subprocess.run(
+            ["gz", "topic", "-e", "-t", f"/world/{world}/dynamic_pose/info", "-n", "1"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {}
+    if result.returncode != 0:
+        return {}
+
+    poses: dict[str, tuple[float, float, float]] = {}
+    name = None
+    pending: dict[str, list[float]] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith('name: "'):
+            name = line.split('"')[1]
+        elif name and line[:3] in ("x: ", "y: ", "z: "):
+            pending.setdefault(name, []).append(float(line[3:]))
+    for key, values in pending.items():
+        if len(values) >= 3:
+            poses[key] = (values[0], values[1], values[2])
+    return poses
+
+
 def send_arm_home(duration: float = 4.0) -> bool:
     """Publish a single trajectory point straight at the arm controller."""
     positions = ", ".join(str(HOME_JOINTS[j]) for j in HOME_JOINTS)
