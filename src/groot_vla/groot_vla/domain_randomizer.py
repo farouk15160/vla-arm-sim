@@ -88,6 +88,30 @@ def remove_model(name: str, world: str = WORLD) -> bool:
                f'name: "{name}", type: MODEL')
 
 
+def model_exists(name: str, world: str = WORLD) -> bool:
+    """True if a model of this name is still in the world."""
+    result = subprocess.run(["gz", "model", "--list"], capture_output=True,
+                            text=True, timeout=10)
+    return f"- {name}" in result.stdout
+
+
+def remove_and_wait(name: str, world: str = WORLD, attempts: int = 5) -> bool:
+    """Remove a model and confirm it is gone.
+
+    Even the blocking remove service occasionally returns before the entity has
+    left the world, and spawning does not allow renaming, so the next create
+    fails on the name. Polling the model list is the only reliable confirmation.
+    """
+    import time
+
+    for attempt in range(attempts):
+        remove_model(name, world)
+        if not model_exists(name, world):
+            return True
+        time.sleep(0.3 * (attempt + 1))
+    return not model_exists(name, world)
+
+
 def spawn_sdf(sdf: str, world: str = WORLD, allow_renaming: bool = False) -> bool:
     # The SDF is embedded in a protobuf text field, so its double quotes have to
     # be escaped or the request fails to parse.
@@ -318,7 +342,7 @@ class DomainRandomizer:
         scene whose objects never move however much you randomise.
         """
         for index in range(self.MAX_OBJECTS):
-            remove_model(f"obj_{index}", self.world)
+            remove_and_wait(f"obj_{index}", self.world)
         self._spawned.clear()
         # The world file's original cubes, if they are still around.
         for name in ("red_cube", "green_cube", "blue_cube"):
@@ -342,14 +366,17 @@ class DomainRandomizer:
             taken.append((position[0], position[1]))
 
             name = f"obj_{index}"
-            if not spawn_sdf(
-                object_sdf(name, shape, size, COLOUR_NAMES[colour_name], position),
-                self.world,
-            ):
+            sdf = object_sdf(name, shape, size, COLOUR_NAMES[colour_name], position)
+            # Retry: a stale entity that has not finished being torn down will
+            # block the create, and one hiccup should not end a collection run.
+            for attempt in range(3):
+                if spawn_sdf(sdf, self.world):
+                    break
+                remove_and_wait(name, self.world)
+            else:
                 raise RuntimeError(
-                    f"failed to spawn {name}; is an object of that name still in "
-                    "the world? Spawning does not allow renaming, so a leftover "
-                    "blocks it."
+                    f"failed to spawn {name} after 3 attempts; a leftover entity "
+                    "of that name is blocking it (spawning does not allow renaming)"
                 )
             self._spawned.append(name)
             objects.append(SceneObject(name, shape, colour_name, size, position))

@@ -147,7 +147,14 @@ class DemoCollector(Node):
             self.moveit.move_to_joints(HOME_JOINTS)
 
             if self.domain_randomize:
-                scene = self._randomizer.randomize_all(self.distractors)
+                try:
+                    scene = self._randomizer.randomize_all(self.distractors)
+                except RuntimeError as exc:
+                    # Losing 40 minutes of collection to one failed spawn is a
+                    # far worse outcome than losing one episode.
+                    self.get_logger().warn(f"scene setup failed ({exc}); skipping")
+                    failed += 1
+                    continue
                 spawned = scene["target"]
                 # Read the pose back rather than trusting the requested one:
                 # the object settles under gravity before the demo starts.
