@@ -478,24 +478,45 @@ twist expires after `twist_hold_time` so a dead policy cannot leave it drifting.
 
 ## Running out of VRAM
 
-The card is shared with everything else on the desktop. A game, a browser with
-hardware acceleration, or a second model will take the memory the policy needs,
-and 6 GB does not leave much slack. Check before blaming the stack:
+The card is shared with everything else on the desktop, and 6 GB does not leave
+much slack. Check before blaming the stack — but check *properly*:
 
 ```bash
-nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv
+nvidia-smi        # read the Processes block at the bottom, including 'G' rows
 ```
 
-Both servers now handle a busy GPU rather than dying part way through loading:
+`--query-compute-apps` alone is **misleading**: it lists CUDA contexts only, so
+the desktop compositor, your browser and Gazebo's renderer are invisible to it.
+On this machine those account for over a gigabyte, which produced the actively
+wrong report that the only process on the GPU was the policy server itself.
 
-* **smolvla_server** falls back to CPU automatically, naming what is holding the
-  GPU. It still works — about 25 s per inference instead of 950 ms.
-* **openvla_server** checks free VRAM up front and either offloads layers to
-  CPU or exits immediately with an actionable message, instead of crashing
-  after 30 s of loading with a CUDA traceback.
+Measured on a 6 GB RTX 2060 (5.60 GiB usable):
 
-If you need the GPU back, close the other application, or run headless
-(`gazebo_gui:=false`) to save the renderer's share.
+| Consumer | VRAM |
+|---|---|
+| desktop (Xorg + gnome-shell + browser) | ~0.8-1.1 GiB |
+| Gazebo headless, two cameras | ~0.2 GiB |
+| SmolVLA | 0.91 GiB |
+| OpenVLA-7B 4-bit, weights only | 4.32 GiB |
+| OpenVLA-7B 4-bit, weights + inference activations | **~4.7 GiB** |
+
+So **SmolVLA fits comfortably; OpenVLA is marginal** — it wants about 4.8 GiB
+free while a typical desktop leaves 4.5-4.6 GiB. Free a few hundred MiB of
+GPU-using apps and it runs.
+
+Both servers handle a busy GPU rather than dying part way through loading:
+
+* **smolvla_server** falls back to CPU automatically, naming what holds the GPU.
+  It still works — about 25 s per inference instead of 850 ms.
+* **openvla_server** checks free VRAM up front and refuses with the exact
+  shortfall in MiB plus concrete options, instead of crashing after 30 s of
+  loading. `--gpu-headroom-gib` tunes the threshold for a marginal fit.
+
+A 4-bit model is **all-or-nothing on the GPU**. Partial CPU offload loads
+without complaint and then fails on the first inference with *"Blockwise 4bit
+quantization only supports 16/32-bit floats, but got torch.uint8"* -
+bitsandbytes cannot dequantize blocks living in host memory. The server
+therefore refuses rather than offloading.
 
 ## Who owns the arm
 

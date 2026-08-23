@@ -70,8 +70,13 @@ ARM_DOF = 6
 # Weights need ~4.4 GB in NF4. Below this much free VRAM the model cannot be
 # resident and layers are offloaded to CPU instead.
 NF4_WEIGHTS_GIB = 4.4
-# Leave room for activations and the CUDA context.
-ACTIVATION_HEADROOM_GIB = 0.7
+# Room for activations, the vision tower and the CUDA context, on top of the
+# weights. Calibrated against a measured successful run: the process peaked at
+# 4.28 GiB resident with ~0.5 GiB spare. Larger values are safer but on a 6 GB
+# card quickly exceed what the device can ever offer - keep the total below the
+# card's usable capacity or the server can never start. Override with
+# --gpu-headroom-gib when you want to attempt a marginal fit.
+ACTIVATION_HEADROOM_GIB = 0.4
 
 
 def gpu_memory_gib() -> tuple[float, float]:
@@ -87,17 +92,32 @@ def gpu_memory_gib() -> tuple[float, float]:
 
 
 def describe_gpu_hogs() -> str:
-    """Name the processes holding VRAM, so the failure is actionable."""
+    """Name every process holding VRAM.
+
+    Deliberately parses the full nvidia-smi process table rather than
+    --query-compute-apps. That query lists CUDA contexts ONLY, so the desktop
+    compositor, the browser and Gazebo's renderer - all graphics contexts, and
+    together often more than a gigabyte - are invisible to it. Using it alone
+    produces the actively misleading report that the only process on the GPU is
+    yourself, while a third of the card is already gone.
+    """
     try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,used_memory,process_name",
-             "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=5,
-        )
+        result = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
-        return ""
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return "\n".join(f"    {line}" for line in lines)
+        return "    (could not read nvidia-smi)"
+
+    lines = result.stdout.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if "Processes:" in line)
+    except StopIteration:
+        return "    (no process table)"
+
+    rows = []
+    for line in lines[start:]:
+        # Data rows look like: |  0  N/A  N/A  1234  G  /usr/lib/xorg/Xorg  602MiB |
+        if line.startswith("|") and "MiB" in line and "GPU Memory" not in line:
+            rows.append("    " + line.strip("| ").rstrip("| ").strip())
+    return "\n".join(rows) or "    (none reported)"
 
 
 class OpenVLAServer:
@@ -109,10 +129,12 @@ class OpenVLAServer:
         unnorm_key: str = "bridge_orig",
         load_in_4bit: bool = True,
         device_map: str = "auto",
+        gpu_headroom_gib: float = ACTIVATION_HEADROOM_GIB,
         action_horizon: int = 1,
         verbose: bool = True,
     ) -> None:
         self.unnorm_key = unnorm_key
+        self.gpu_headroom_gib = gpu_headroom_gib
         self.action_horizon = max(action_horizon, 1)
         self.verbose = verbose
         self._calls = 0
@@ -147,23 +169,32 @@ class OpenVLAServer:
                 flush=True,
             )
 
-        needed = NF4_WEIGHTS_GIB + ACTIVATION_HEADROOM_GIB if load_in_4bit else 14.0
+        # A 4-bit model must be FULLY resident on the GPU. Letting accelerate
+        # offload some layers to CPU loads without complaint and then fails on
+        # the first inference with "Blockwise 4bit quantization only supports
+        # 16/32-bit floats, but got torch.uint8" - bitsandbytes cannot
+        # dequantize blocks living in host memory. Refusing up front with a
+        # precise shortfall beats a server that starts and then breaks.
+        needed = NF4_WEIGHTS_GIB + self.gpu_headroom_gib if load_in_4bit else 14.0
         if not self.cpu_only and free_gib < needed:
-            hogs = describe_gpu_hogs()
-            print(
-                f"[openvla] WARNING: {free_gib:.2f} GiB free, ~{needed:.1f} GiB wanted.\n"
-                f"[openvla] Layers that do not fit will run on the CPU, which is\n"
-                f"[openvla] MUCH slower. Free VRAM for full speed - current users:\n"
-                f"{hogs or '    (could not read nvidia-smi)'}",
-                flush=True,
-            )
-        if not self.cpu_only and free_gib < 1.2:
+            shortfall = int((needed - free_gib) * 1024)
             raise SystemExit(
-                f"[openvla] only {free_gib:.2f} GiB of VRAM is free; even the CPU-offload\n"
-                f"path needs roughly 1.2 GiB for the vision tower and activations.\n"
-                f"Close whatever is holding the GPU, or run smolvla_server instead\n"
-                f"(0.9 GiB), or pass --device-map cpu to run entirely on the CPU.\n"
-                f"Current GPU users:\n{hogs or '    (could not read nvidia-smi)'}"
+                f"\n[openvla] NOT ENOUGH VRAM.\n"
+                f"  free:     {free_gib:.2f} GiB\n"
+                f"  required: {needed:.2f} GiB  ({NF4_WEIGHTS_GIB:.1f} weights + "
+                f"{self.gpu_headroom_gib:.1f} activations)\n"
+                f"  short by: {shortfall} MiB\n\n"
+                f"A 4-bit model cannot be partially offloaded: it would load and then\n"
+                f"fail on the first inference. Free that much VRAM, or pick another route:\n\n"
+                f"  * close GPU-heavy desktop apps (a browser is often 150-400 MiB)\n"
+                f"  * run the simulator headless:  gazebo_gui:=false   (~200 MiB)\n"
+                f"  * use SmolVLA instead, which needs 0.9 GiB:\n"
+                f"        ros2 launch groot_arm_bringup system.launch.py policy:=smolvla\n"
+                f"  * run OpenVLA on another machine and point the stack at it:\n"
+                f"        system.launch.py policy:=openvla policy_host:=<that machine>\n"
+                f"  * last resort, entirely on CPU (~14 GB RAM, very slow):\n"
+                f"        openvla_server.py --device-map cpu\n\n"
+                f"Current GPU users (graphics contexts included):\n{describe_gpu_hogs()}\n"
             )
 
         print(f"[openvla] loading {model_path} (4bit={load_in_4bit}) ...", flush=True)
@@ -186,14 +217,11 @@ class OpenVLAServer:
                 bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
-                llm_int8_enable_fp32_cpu_offload=True,
             )
-            # Hand accelerate an explicit budget instead of letting it assume
-            # the whole card is ours. Without this it fills VRAM and dies part
-            # way through loading shard 3 of 3.
-            budget = max(free_gib - ACTIVATION_HEADROOM_GIB, 0.5)
-            kwargs["device_map"] = "auto"
-            kwargs["max_memory"] = {0: f"{budget:.2f}GiB", "cpu": "16GiB"}
+            # Everything on device 0. Room has already been established above;
+            # "auto" with a budget would silently offload the overflow, which
+            # 4-bit cannot survive at inference time.
+            kwargs["device_map"] = {"": 0}
         elif self.cpu_only:
             kwargs["device_map"] = {"": "cpu"}
         else:
@@ -369,6 +397,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--action-horizon", type=int, default=1)
     parser.add_argument("--device-map", default="auto", choices=["auto", "cpu"],
                         help="'cpu' runs entirely on CPU when the GPU is busy")
+    parser.add_argument("--gpu-headroom-gib", type=float, default=ACTIVATION_HEADROOM_GIB,
+                        help="VRAM held back from the weight budget for activations")
     parser.add_argument("--list-unnorm-keys", action="store_true",
                         help="print the checkpoint's dataset keys and exit")
     parser.add_argument("--quiet", action="store_true")
@@ -382,6 +412,7 @@ def main(argv: list[str] | None = None) -> None:
         load_in_4bit=not args.no_4bit,
         action_horizon=args.action_horizon,
         device_map=args.device_map,
+        gpu_headroom_gib=args.gpu_headroom_gib,
         verbose=not args.quiet,
     )
     if args.list_unnorm_keys:
