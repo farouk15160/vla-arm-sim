@@ -417,6 +417,18 @@ class GrootPolicyNode(Node):
                 self._last_twist_time = time.monotonic()
             self._publish_twist(twist)
         else:
+            # Rate-limit from where the arm is NOW, not from the position that
+            # was captured before inference. On a slow policy that snapshot is
+            # a full inference period old (~850 ms for SmolVLA, seconds for
+            # OpenVLA) and the arm has moved since, so every chunk began with a
+            # step discontinuity the controller could not track - which is what
+            # produced "Holding position due to state tolerance violation".
+            with self._lock:
+                latest = dict(self._joint_positions)
+            try:
+                current_arm = joint_positions_to_array(latest, ARM_JOINTS)
+            except KeyError:
+                pass  # keep the pre-inference snapshot rather than fail
             targets = self._action_mapper.to_joint_targets(arm_chunk, current_arm)
             targets = targets[: max(self.execution_horizon, 1)]
             self._check_workspace()

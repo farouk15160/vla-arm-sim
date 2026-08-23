@@ -29,17 +29,23 @@
 
     # --------------------------------------------------------------- control
     action_space: "joint_position"
-    # ~1 Hz, matched to the measured inference latency. Each reply covers
-    # execution_horizon * action_dt = 0.8 s of motion, so the arm keeps moving
-    # smoothly between inferences instead of stuttering.
     control_rate: 1.0
     execution_horizon: 8
-    action_dt: 0.1
+    # 0.2 s per chunk step, not 0.1. A zero-shot policy emits joint targets far
+    # from the current pose; asking the controller to cover that in 0.1 s
+    # demands a velocity it cannot track, and arm_controller aborts the
+    # trajectory with "Holding position due to state tolerance violation".
+    # Doubling the step time halves the demanded velocity and keeps the
+    # trajectory followable. Each reply now covers 1.6 s of motion.
+    action_dt: 0.2
 
     # ---------------------------------------------------------------- safety
     # Same envelope as the GR00T config. A 450M policy is no more trustworthy
     # than a 3B one.
-    max_joint_step: 0.15
+    # 0.08 rad per chunk step, i.e. 0.4 rad/s at the action_dt above. Tight
+    # enough that an out-of-distribution policy moves the arm gently rather
+    # than slamming it against the tracking tolerance.
+    max_joint_step: 0.08
     # Must exceed the inference period or the watchdog trips on its own latency.
     observation_timeout: 3.0
     enforce_workspace: true
