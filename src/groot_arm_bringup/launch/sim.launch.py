@@ -11,10 +11,12 @@ MoveIt is deliberately NOT started here - see demo.launch.py.
 """
 
 import os
+from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
+    AppendEnvironmentVariable,
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     RegisterEventHandler,
@@ -144,8 +146,21 @@ def generate_launch_description():
         )
     )
 
+    # The world references textures as
+    # model://groot_arm_description/materials/textures/*.png. Gazebo resolves a
+    # model:// URI by looking for a directory of that name inside each
+    # GZ_SIM_RESOURCE_PATH entry, so the entry must be the PARENT of the
+    # package share directory, not the package directory itself. Point it at
+    # the package dir and every textured surface silently falls back to its
+    # flat diffuse colour with only an [Err] line in the log.
+    texture_path = AppendEnvironmentVariable(
+        "GZ_SIM_RESOURCE_PATH",
+        str(Path(get_package_share_directory("groot_arm_description")).parent),
+    )
+
     return LaunchDescription(
         [
+            texture_path,
             DeclareLaunchArgument(
                 "ur_type",
                 default_value="ur5e",

@@ -347,7 +347,7 @@ checkpoint carries 7-dim state/action, so the gripper works too.
 
 | Package | Contents |
 |---|---|
-| `groot_arm_description` | UR5e (from `ur_description`) + parallel gripper + wrist/scene cameras, `gz_ros2_control`, tabletop world |
+| `groot_arm_description` | UR5e (from `ur_description`) + parallel gripper + wrist/scene cameras, `gz_ros2_control`, tabletop world, PBR materials and generated textures |
 | `groot_arm_moveit_config` | SRDF, kinematics, OMPL/Pilz, `move_group`, RViz, Servo |
 | `groot_arm_bringup` | `sim` / `demo` / `vla` launch files, `kill_stack.sh` |
 | `groot_vla` | policy client, observation builder, action mapper, policy node, **SmolVLA server**, mock server, probe, MoveIt helper, recorder, exporter |
@@ -361,6 +361,36 @@ Key frames and topics:
 - `arm_controller`, `gripper_controller` — shared by MoveIt and the policy
 
 ---
+
+## Scene appearance
+
+The world uses PBR materials with generated texture maps rather than flat
+colours: a speckled melamine worktop, brushed-steel tray, painted walls and a
+concrete floor, lit by a warm shadow-casting key, a cool fill and a soft
+overhead. The cell is enclosed by walls on the sides the cameras actually face,
+so renders are a grounded room rather than objects floating in grey void.
+
+Textures are **generated, not downloaded**, so the repository stays
+self-contained with no third-party asset licensing:
+
+```bash
+python3 src/groot_arm_description/materials/make_textures.py
+```
+
+Two things worth knowing if you change them:
+
+* A map is stretched **once** across the surface it is on, so a feature 50 px
+  wide in a 512 px map is ~14 cm wide on a 1.4 m table. Detail has to live at
+  high spatial frequency or it renders as blotches. The first attempt at wood
+  used ~5 grain cycles across the map and looked like spilled paint.
+* Texture URIs use `model://groot_arm_description/...`. Gazebo resolves those by
+  looking for a directory of that name inside each `GZ_SIM_RESOURCE_PATH` entry,
+  so `sim.launch.py` puts the **parent** of the package share directory on the
+  path. Point it at the package directory itself and every texture silently
+  falls back to its flat diffuse colour, with only an `[Err]` line in the log.
+
+The worktop is deliberately light and low-contrast: it keeps the coloured cubes
+visually distinct, which is what the policy keys on.
 
 ## Verified
 

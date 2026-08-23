@@ -4,7 +4,7 @@ project(groot_arm_description)
 find_package(ament_cmake REQUIRED)
 
 install(
-  DIRECTORY urdf config worlds launch rviz
+  DIRECTORY urdf config worlds launch rviz materials
   DESTINATION share/${PROJECT_NAME}
 )
 
