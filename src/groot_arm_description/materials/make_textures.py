@@ -118,13 +118,69 @@ def wall() -> Image.Image:
     return to_image(base)
 
 
+def height_to_normal(height: np.ndarray, strength: float = 2.5) -> Image.Image:
+    """Derive a tangent-space normal map from a height field.
+
+    Ogre2 has no global illumination in this Gazebo build, so the cheapest
+    route to surfaces that look like materials rather than coloured cardboard
+    is per-pixel relief. A normal map perturbs the shading normal so a flat
+    primitive catches light unevenly - which is most of what the eye reads as
+    "real" on close-up surfaces like a worktop.
+
+    Encoding is the standard one: RGB = (x, y, z) remapped from [-1, 1] to
+    [0, 255], with +z out of the surface (so a flat area is ~(128, 128, 255)).
+    """
+    height = height.astype(np.float64)
+    # np.roll wraps, which keeps the map tileable.
+    dx = (np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) * strength
+    dy = (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) * strength
+
+    normal = np.stack([-dx, -dy, np.ones_like(height)], axis=-1)
+    normal /= np.linalg.norm(normal, axis=-1, keepdims=True)
+    return to_image((normal * 0.5 + 0.5) * 255.0)
+
+
+def to_grey(values: np.ndarray, low: float, high: float) -> Image.Image:
+    """Single-channel map scaled into [low, high], written as RGB.
+
+    Gazebo reads roughness/AO maps as greyscale but the loader is happiest
+    with a normal 3-channel PNG.
+    """
+    scaled = np.clip(low + values * (high - low), 0.0, 1.0) * 255.0
+    return to_image(np.repeat(scaled[..., None], 3, axis=-1))
+
+
+def luminance(image: Image.Image) -> np.ndarray:
+    """Perceptual luminance in [0, 1], used as the height field."""
+    rgb = np.asarray(image, dtype=np.float64) / 255.0
+    return rgb @ np.array([0.2126, 0.7152, 0.0722])
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    for name, builder in (("bench", bench), ("wood", wood), ("concrete", concrete),
-                          ("metal", brushed_metal), ("wall", wall)):
-        path = OUT / f"{name}.png"
-        builder().save(path, optimize=True)
-        print(f"  {path.name}: {path.stat().st_size // 1024} KB")
+    # (name, builder, normal strength, roughness range, AO strength)
+    # Rougher surfaces get a wider roughness spread; smooth ones stay tight.
+    recipes = (
+        ("bench", bench, 1.6, (0.55, 0.80), 0.25),
+        ("wood", wood, 2.6, (0.40, 0.70), 0.30),
+        ("concrete", concrete, 3.2, (0.70, 0.95), 0.40),
+        ("metal", brushed_metal, 1.2, (0.15, 0.40), 0.15),
+        ("wall", wall, 0.8, (0.85, 0.98), 0.20),
+    )
+    for name, builder, strength, (r_low, r_high), ao in recipes:
+        albedo = builder()
+        albedo.save(OUT / f"{name}.png", optimize=True)
+
+        height = luminance(albedo)
+        height_to_normal(height, strength).save(OUT / f"{name}_normal.png", optimize=True)
+        # Rougher where the surface is darker: grime and pits scatter light.
+        to_grey(1.0 - height, r_low, r_high).save(OUT / f"{name}_rough.png", optimize=True)
+        # Crude cavity AO: recessed (dark) areas receive less ambient light.
+        to_grey(height, 1.0 - ao, 1.0).save(OUT / f"{name}_ao.png", optimize=True)
+
+        total = sum((OUT / f"{name}{suffix}.png").stat().st_size
+                    for suffix in ("", "_normal", "_rough", "_ao"))
+        print(f"  {name}: albedo + normal + roughness + ao = {total // 1024} KB")
 
 
 if __name__ == "__main__":

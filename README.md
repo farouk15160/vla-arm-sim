@@ -502,6 +502,50 @@ Two things worth knowing if you change them:
 The worktop is deliberately light and low-contrast: it keeps the coloured cubes
 visually distinct, which is what the policy keys on.
 
+## How photorealistic can this get?
+
+Short answer: **better, but not photoreal — and past a point it costs you data.**
+
+Gazebo Harmonic renders through Ogre2, a rasteriser. This build ships **no
+global-illumination plugin** (no voxel cone tracing), so there is no bounced
+light, no ray-traced reflections and no real ambient occlusion. That is the
+ceiling.
+
+What the scene does use, and what each thing costs, measured on the RTX 2060 at
+640x480:
+
+| Configuration | Camera rate | Verdict |
+|---|---|---|
+| flat colours (original) | 30 Hz | baseline |
+| **+ PBR albedo/normal/roughness/AO maps** | **27 Hz** | **kept** - visible surface detail for ~10% |
+| + procedural `<sky>` | 19.8 Hz | **dropped** - 26% slower for a barely visible change |
+
+Normal and roughness maps are the highest-value change available: they perturb
+the shading normal per pixel, so a flat primitive catches light unevenly, which
+is most of what the eye reads as "a material" rather than "coloured cardboard".
+They are generated from the albedo by `materials/make_textures.py`, so there is
+no third-party asset licensing.
+
+### Do not add `<distortion>` to a camera sensor
+
+Gazebo Harmonic accepts the element, loads the model without error, advertises
+the topic - and then never publishes a frame. Verified both ways: adding it
+killed both cameras, removing it restored 30 Hz. Apply lens distortion
+downstream on the image if you want it.
+
+### Realism is not the bottleneck for VLA training
+
+Worth saying plainly, because it is easy to spend days here: **domain
+randomisation matters more than fidelity for sim-to-real.** A policy trained on
+one beautifully-rendered scene overfits that scene. A policy trained across
+varied lighting, colours, shapes and distractors learns the task, even from
+plainer renders.
+
+Framerate is also not free: at 20 Hz instead of 30 the simulation collects
+demonstrations proportionally slower, and dataset size is the thing most
+limiting policy quality right now. Spend the GPU on more episodes before
+spending it on prettier pixels.
+
 ## Verified
 
 Checked by running it on ROS 2 Jazzy / Gazebo Harmonic 8.11 / Ubuntu 24.04 /

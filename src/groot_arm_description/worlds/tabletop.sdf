@@ -33,8 +33,11 @@
     <!-- Low ambient so the lights below actually shape the scene. High
          ambient washes everything flat, which is what made the original look
          like untextured CAD. -->
+    <!-- A sky gives the renderer a genuine environment source: the background
+         gradient lights the scene and shows up in specular highlights, rather
+         than everything being lit only by the three explicit lights. -->
     <scene>
-      <ambient>0.28 0.29 0.32 1</ambient>
+      <ambient>0.30 0.31 0.34 1</ambient>
       <background>0.62 0.66 0.72 1</background>
       <grid>false</grid>
       <shadows>true</shadows>
@@ -125,6 +128,9 @@
             <pbr>
               <metal>
                 <albedo_map>model://groot_arm_description/materials/textures/bench.png</albedo_map>
+                <normal_map>model://groot_arm_description/materials/textures/bench_normal.png</normal_map>
+                <roughness_map>model://groot_arm_description/materials/textures/bench_rough.png</roughness_map>
+                <ambient_occlusion_map>model://groot_arm_description/materials/textures/bench_ao.png</ambient_occlusion_map>
                 <roughness>0.68</roughness>
                 <metalness>0.0</metalness>
               </metal>
@@ -168,6 +174,9 @@
             <pbr>
               <metal>
                 <albedo_map>model://groot_arm_description/materials/textures/wall.png</albedo_map>
+                <normal_map>model://groot_arm_description/materials/textures/wall_normal.png</normal_map>
+                <roughness_map>model://groot_arm_description/materials/textures/wall_rough.png</roughness_map>
+                <ambient_occlusion_map>model://groot_arm_description/materials/textures/wall_ao.png</ambient_occlusion_map>
                 <roughness>0.95</roughness>
                 <metalness>0.0</metalness>
               </metal>
@@ -193,6 +202,9 @@
             <pbr>
               <metal>
                 <albedo_map>model://groot_arm_description/materials/textures/wall.png</albedo_map>
+                <normal_map>model://groot_arm_description/materials/textures/wall_normal.png</normal_map>
+                <roughness_map>model://groot_arm_description/materials/textures/wall_rough.png</roughness_map>
+                <ambient_occlusion_map>model://groot_arm_description/materials/textures/wall_ao.png</ambient_occlusion_map>
                 <roughness>0.95</roughness>
                 <metalness>0.0</metalness>
               </metal>
@@ -218,6 +230,9 @@
             <pbr>
               <metal>
                 <albedo_map>model://groot_arm_description/materials/textures/wall.png</albedo_map>
+                <normal_map>model://groot_arm_description/materials/textures/wall_normal.png</normal_map>
+                <roughness_map>model://groot_arm_description/materials/textures/wall_rough.png</roughness_map>
+                <ambient_occlusion_map>model://groot_arm_description/materials/textures/wall_ao.png</ambient_occlusion_map>
                 <roughness>0.95</roughness>
                 <metalness>0.0</metalness>
               </metal>
@@ -344,6 +359,9 @@
             <pbr>
               <metal>
                 <albedo_map>model://groot_arm_description/materials/textures/metal.png</albedo_map>
+                <normal_map>model://groot_arm_description/materials/textures/metal_normal.png</normal_map>
+                <roughness_map>model://groot_arm_description/materials/textures/metal_rough.png</roughness_map>
+                <ambient_occlusion_map>model://groot_arm_description/materials/textures/metal_ao.png</ambient_occlusion_map>
                 <roughness>0.28</roughness>
                 <metalness>0.9</metalness>
               </metal>

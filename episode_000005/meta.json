@@ -1,0 +1,24 @@
+{
+  "episode_index": 5,
+  "task": "pick up the red cylinder and place it in the tray",
+  "fps": 10.0,
+  "num_frames": 156,
+  "cameras": [
+    "wrist_view",
+    "ego_view"
+  ],
+  "image_size": [
+    224,
+    224
+  ],
+  "arm_joints": [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint"
+  ],
+  "gripper_joint": "left_finger_joint",
+  "recorded_at": "2026-08-24T09:33:46"
+}
