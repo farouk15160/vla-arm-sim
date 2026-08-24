@@ -39,6 +39,29 @@ Add the *Linux Build Support* module if you want standalone builds.
 
 Personal licences are free for individuals and small revenue.
 
+## 1b. Editor version and render pipeline
+
+`ProjectSettings/ProjectVersion.txt` pins **Unity 6000.5.9f1**. Unity Hub reads
+the editor version from that file alone - without it the project lists as
+"Editor version: Unknown" with a warning and Hub cannot choose an Editor.
+
+If you have a different Editor installed, edit that file to match, or let Hub
+upgrade the project when it offers to.
+
+The manifest deliberately does **not** pin HDRP. HDRP is worth having (global
+illumination, area lights, reflections - the reason to use Unity at all), but
+enabling it is a multi-step Editor task: install the package, create a pipeline
+asset, assign it in Graphics settings, then convert materials. Doing that before
+the project opens once tends to produce a project that will not open at all.
+Get the bridge working on the built-in pipeline first, then add HDRP through
+**Window -> Package Manager -> High Definition RP** and run its wizard.
+
+The robotics packages are pulled from their **default branches** rather than the
+v0.7.0 / v0.5.2 tags. Those tags date from 2022 and predate Unity 6; the tips
+are more likely to compile. If Unity reports compile errors in
+`Unity.Robotics.*`, that is the cause - pin back to a tag that matches your
+Editor, or use Unity 2022.3 LTS instead.
+
 ## 2. Open this project
 
 Unity Hub -> **Add** -> select this `unity/` directory. On first open it
