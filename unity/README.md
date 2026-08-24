@@ -106,9 +106,30 @@ xacro install/groot_arm_description/share/groot_arm_description/urdf/groot_arm.u
 In Unity: right-click `groot_arm.urdf` -> **Import Robot from Selected URDF
 file**. Set **Convex Decomposer: VHACD** for usable gripper collisions.
 
-The UR meshes live in `/opt/ros/jazzy/share/ur_description/meshes/`; copy that
-folder next to the URDF if Unity reports missing meshes, since it cannot follow
-`package://` URIs.
+### Mesh placement matters, and is not obvious
+
+The URDF references meshes as
+`package://ur_description/meshes/ur5e/collision/base.stl`. URDF-Importer
+resolves a `package://<pkg>/...` URI to `Assets/<pkg>/...`, so the meshes must
+land at **`Assets/ur_description/meshes/`** — not `Assets/meshes/`:
+
+```bash
+mkdir -p unity/Assets/ur_description
+cp -r /opt/ros/jazzy/share/ur_description/meshes unity/Assets/ur_description/
+```
+
+Two failure modes if this is wrong:
+
+* `DirectoryNotFoundException: Could not find a part of the path
+  .../Assets/ur_description/meshes/ur5e/collision/base.stl` — the import stops
+  part-way, leaving a partial robot.
+* `Assets/meshes cannot be created! It may already exist.` — `Assets/meshes` is
+  where the importer writes its **own** generated primitives (`Cylinder.asset`
+  for cylinder colliders). Putting the UR meshes there collides with its
+  workspace.
+
+If a previous attempt left meshes in the wrong place, remove them from
+`Assets/meshes/` and re-import.
 
 ## 4. Build the scene (one click)
 

@@ -75,7 +75,8 @@ public static class BuildGrootScene
         if (byName != null) return byName;
 
         // Fall back to any object owning the shoulder joint.
-        return Object.FindObjectsByType<ArticulationBody>(FindObjectsSortMode.None)
+        // Unity 6 deprecated the FindObjectsSortMode overload.
+        return Object.FindObjectsByType<ArticulationBody>(FindObjectsInactive.Include)
             .Select(a => a.transform.root.gameObject)
             .FirstOrDefault(go => go.GetComponentsInChildren<ArticulationBody>()
                                     .Any(a => a.name.Contains("shoulder_pan")));
