@@ -36,6 +36,13 @@
   <xacro:property name="tf_prefix" value="$(arg tf_prefix)"/>
   <xacro:property name="pedestal_height" value="0.6"/>
   <xacro:property name="gripper_stroke" value="0.04"/>
+  <!-- The policy downsamples to 224x224 regardless, so rendering 640x480 is
+       mostly wasted GPU. 320x240 stays above that and roughly halves the
+       render cost. Raise it if you want nicer recordings to look at. -->
+  <xacro:arg name="camera_width" default="320"/>
+  <xacro:arg name="camera_height" default="240"/>
+  <xacro:property name="camera_width" value="$(arg camera_width)"/>
+  <xacro:property name="camera_height" value="$(arg camera_height)"/>
 
   <!-- =========================== world =========================== -->
   <link name="world"/>
@@ -95,7 +102,7 @@
        is atan2(-dz, dx) of the camera->TCP vector; recompute it if you move the
        camera. Gazebo's optical axis is +x. -->
   <xacro:rgb_camera name="wrist_camera" parent="${tf_prefix}gripper_base_link"
-                    width="640" height="480" hfov="1.4">
+                    width="${camera_width}" height="${camera_height}" hfov="1.4">
     <origin xyz="0.05 0 0.025" rpy="0 ${-2.2865} 0"/>
   </xacro:rgb_camera>
 
@@ -128,7 +135,7 @@
   <!-- Aimed at (0.46, 0, 0.62) in world coords, i.e. the middle of the cube
        field. rpy derived from that sight line; see README if you move the mast. -->
   <xacro:rgb_camera name="scene_camera" parent="camera_mast_link"
-                    width="640" height="480" hfov="1.25">
+                    width="${camera_width}" height="${camera_height}" hfov="1.25">
     <origin xyz="0 0 1.1" rpy="0 0.7000 -0.7247"/>
   </xacro:rgb_camera>
 

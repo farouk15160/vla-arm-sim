@@ -502,6 +502,46 @@ Two things worth knowing if you change them:
 The worktop is deliberately light and low-contrast: it keeps the coloured cubes
 visually distinct, which is what the policy keys on.
 
+## Collecting data faster
+
+Episode time went from ~45 s to **18 s** (2.5x) through three measured changes:
+
+| Change | Why |
+|---|---|
+| `real_time_factor: 1.0 -> 0` | physics runs unthrottled instead of pacing to wall-clock. Everything downstream uses `use_sim_time`, so controllers, MoveIt and the recorder speed up together and the recorded data is identical - just collected sooner |
+| MoveIt scaling `0.25 -> 0.6` | most of an episode is the arm travelling between waypoints. Biggest single lever |
+| cameras `640x480 -> 320x240` | the policy downsamples to 224x224 anyway, so the extra pixels were discarded work. Camera rate 19.8 -> 39 Hz |
+
+Camera size is a launch argument, so raise it for nicer recordings:
+
+```bash
+ros2 launch groot_arm_bringup system.launch.py camera_width:=640 camera_height:=480
+```
+
+### Running several simulations at once
+
+```bash
+ros2 run groot_arm_bringup collect_parallel.sh \
+    --workers 3 --episodes 40 --output $PWD/data/demos/run1
+
+python3 src/groot_vla/groot_vla/merge_demos.py \
+    --inputs data/demos/run1/worker_* --output data/demos/run1/merged
+```
+
+Each worker runs on its own `ROS_DOMAIN_ID` **and** its own `GZ_PARTITION`.
+Both are needed: the domain id separates the DDS network, but Gazebo's own
+transport discovery ignores it, so without a partition two simulations fight
+over world and service names.
+
+Workers number episodes from zero independently, so `merge_demos.py` renumbers
+as it copies and records which worker each came from. It copies rather than
+moves by default - a mistake should not destroy an hour of collection.
+
+Sizing: roughly 1.6 GB RAM and 0.25 GB VRAM per worker, and physics runs
+unthrottled so workers compete for CPU. On this machine (16 cores, 14 GB RAM)
+**RAM is the limit, not cores** - two or three workers is the useful range.
+At 3 workers x 18 s, 150 episodes takes about 15 minutes rather than two hours.
+
 ## How photorealistic can this get?
 
 Short answer: **better, but not photoreal — and past a point it costs you data.**
@@ -517,8 +557,29 @@ What the scene does use, and what each thing costs, measured on the RTX 2060 at
 | Configuration | Camera rate | Verdict |
 |---|---|---|
 | flat colours (original) | 30 Hz | baseline |
-| **+ PBR albedo/normal/roughness/AO maps** | **27 Hz** | **kept** - visible surface detail for ~10% |
+| + PBR albedo/normal/roughness/AO maps | 27 Hz | kept - visible surface detail for ~10% |
 | + procedural `<sky>` | 19.8 Hz | **dropped** - 26% slower for a barely visible change |
+| **+ AmbientCG photo textures, cameras 320x240** | **39 Hz** | **current** - better materials AND faster |
+
+The scene now uses real CC0 PBR sets from [ambientcg.com](https://ambientcg.com)
+(Wood062 worktop, Concrete034 floor, Metal032 tray, Plaster001 walls) and a
+generated `workbench.stl` with an apron, chamfered lip and stretcher shelf -
+silhouette cues a vision model uses to read "workbench" rather than "grey
+rectangle". Collision stays a simple box: a 132-triangle mesh is needless work
+for the physics engine when a slab is exact where it matters.
+
+Textures are **not committed** (~13 MB of third-party JPEGs). Fetch them with:
+
+```bash
+src/groot_arm_description/materials/fetch_ambientcg.sh
+```
+
+Without them the world still loads - the procedural maps from
+`make_textures.py` remain as stand-ins.
+
+Note `NormalGL`, not `NormalDX`: Ogre2 expects the OpenGL convention (green
+channel up). The DirectX variant has it inverted and lights surfaces subtly
+inside-out.
 
 Normal and roughness maps are the highest-value change available: they perturb
 the shading normal per pixel, so a flat primitive catches light unevenly, which

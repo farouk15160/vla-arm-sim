@@ -16,6 +16,9 @@ __pycache__/
 # 312 MB. Record your own with `episode_recorder`, convert with
 # `export_lerobot`. See data/README.md for the layout.
 data/
+# Third-party CC0 textures, ~25 MB. Fetch with
+# src/groot_arm_description/materials/fetch_ambientcg.sh
+src/groot_arm_description/materials/ambientcg/
 groot_episodes/
 groot_lerobot/
 *.safetensors

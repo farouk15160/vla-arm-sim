@@ -9,7 +9,7 @@ install(
 )
 
 install(
-  PROGRAMS scripts/kill_stack.sh
+  PROGRAMS scripts/kill_stack.sh scripts/collect_parallel.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

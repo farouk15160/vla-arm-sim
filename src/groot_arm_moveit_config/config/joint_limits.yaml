@@ -1,8 +1,12 @@
 # MoveIt needs acceleration limits for time parameterisation; the UR URDF only
 # carries velocity/effort. Velocities are deliberately below the hardware
 # maxima so simulated motions stay watchable and stable.
-default_velocity_scaling_factor: 0.25
-default_acceleration_scaling_factor: 0.25
+# Most of an episode is the arm travelling between waypoints, so this is the
+# single biggest lever on collection throughput. 0.6 roughly halves episode
+# duration versus 0.25 and the scripted demo still succeeds; push higher and
+# the gripper starts arriving before the cube has settled.
+default_velocity_scaling_factor: 0.6
+default_acceleration_scaling_factor: 0.6
 
 joint_limits:
   shoulder_pan_joint:
