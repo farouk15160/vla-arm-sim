@@ -13,6 +13,180 @@ The ROS side is a **protocol client**, not a model host. Swapping policies means
 starting a different server — the robot, MoveIt config and safety layer are
 untouched.
 
+## Command reference
+
+Everything, in one place. All ROS commands assume:
+
+```bash
+cd ~/Desktop/code/robotics_and_ros/groot_arm_ws
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+```
+
+### Build
+
+```bash
+colcon build --symlink-install && source install/setup.bash
+colcon build --packages-select groot_vla --symlink-install     # one package
+src/groot_arm_description/materials/fetch_ambientcg.sh          # photo textures (optional)
+unity/setup_unity_bridge.sh                                     # Unity ROS side (optional)
+```
+
+### Run the system
+
+```bash
+ros2 launch groot_arm_bringup system.launch.py                    # mock policy, no GPU
+ros2 launch groot_arm_bringup system.launch.py policy:=smolvla    # SmolVLA, 0.9 GB
+ros2 launch groot_arm_bringup system.launch.py policy:=openvla    # OpenVLA 4-bit + Servo
+ros2 launch groot_arm_bringup system.launch.py policy:=none       # robot + MoveIt only
+```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `policy` | `mock` | `none` / `mock` / `smolvla` / `openvla` |
+| `instruction` | pick up the red cube… | task string |
+| `model_path` | *(empty)* | your fine-tuned checkpoint |
+| `gui` | `true` | Qt control panel |
+| `rviz` | `true` | RViz |
+| `gazebo_gui` | `true` | Gazebo window (`false` = headless, faster) |
+| `goal_marker` | `true` | draggable RViz goal |
+| `camera_width` / `camera_height` | `320` / `240` | raise for nicer recordings |
+| `policy_host` / `policy_port` | `127.0.0.1` / `5555` | non-local host = connect, don't start |
+| `venv_python` | `~/vla_venv/bin/python` | interpreter for SmolVLA |
+| `openvla_python` | `~/openvla_venv/bin/python` | interpreter for OpenVLA |
+
+```bash
+# your own fine-tune, headless, no GUI
+ros2 launch groot_arm_bringup system.launch.py \
+    policy:=smolvla model_path:=$PWD/data/checkpoints/pickplace/checkpoints/last/pretrained_model \
+    gazebo_gui:=false gui:=false instruction:="put the blue cube in the tray"
+```
+
+### Drive the robot
+
+```bash
+ros2 service call /groot_policy/enable std_srvs/srv/SetBool "{data: true}"   # arm
+ros2 service call /groot_policy/enable std_srvs/srv/SetBool "{data: false}"  # disarm
+ros2 service call /groot_policy/halt std_srvs/srv/Trigger                    # stop now
+ros2 service call /groot_policy/reset_policy std_srvs/srv/Trigger            # clear chunk history
+
+ros2 topic echo /groot_policy/status         # armed, latency, failures
+ros2 topic echo /groot_policy/action         # what the policy is emitting
+ros2 topic pub --once /groot_policy/instruction std_msgs/String "{data: 'pick up the green cube'}"
+
+ros2 service call /goal_marker/go_to_marker std_srvs/srv/Trigger   # move to RViz marker
+ros2 topic echo /goal_marker/goal_pose                             # where the marker is
+
+ros2 run groot_vla pick_place_demo --ros-args -p cube:=red_cube    # scripted baseline
+ros2 run groot_vla scene_reset                                     # reset cubes + arm
+ros2 run groot_vla scene_reset --randomize                         # jitter positions
+ros2 run groot_vla domain_randomizer --distractors 3 --seed 7      # one random scene
+```
+
+### Collect demonstrations
+
+Single worker:
+
+```bash
+# terminal 1
+ros2 launch groot_arm_bringup system.launch.py policy:=none gazebo_gui:=false
+# terminal 2
+ros2 run groot_vla episode_recorder --ros-args \
+    -p output_dir:=$PWD/data/demos/run1 -p fps:=10.0 -p use_sim_time:=true
+# terminal 3
+ros2 run groot_vla collect_demos --ros-args \
+    -p episodes:=50 -p distractors:=2 -p seed:=1 -p use_sim_time:=true
+```
+
+Several workers at once (~18 s per episode each):
+
+```bash
+ros2 run groot_arm_bringup collect_parallel.sh \
+    --workers 3 --episodes 50 --output $PWD/data/demos/run1
+
+python3 src/groot_vla/groot_vla/merge_demos.py \
+    --inputs data/demos/run1/worker_* --output data/demos/run1/merged
+```
+
+| `collect_demos` parameter | Default | Meaning |
+|---|---|---|
+| `episodes` | 30 | how many to record |
+| `distractors` | 2 | extra objects that must be ignored |
+| `domain_randomize` | `true` | vary lighting, colours, shapes |
+| `shapes` | `[box, cylinder]` | add `sphere` if you accept more discards |
+| `jitter` | 0.06 | position spread in metres |
+| `seed` | 0 | RNG seed - use a different one per run |
+
+| `collect_parallel.sh` flag | Default | Meaning |
+|---|---|---|
+| `--workers` | 2 | parallel simulations (RAM-limited: ~1.6 GB each) |
+| `--episodes` | 40 | **per worker** |
+| `--output` | *(required)* | parent directory for `worker_N/` |
+| `--distractors` | 2 | passed through |
+| `--base-domain` | 41 | first `ROS_DOMAIN_ID`; workers take consecutive ids |
+
+Recording services, if you want manual control:
+
+```bash
+ros2 service call /episode_recorder/start_episode   std_srvs/srv/Trigger
+ros2 service call /episode_recorder/stop_episode    std_srvs/srv/Trigger
+ros2 service call /episode_recorder/discard_episode std_srvs/srv/Trigger
+```
+
+### Train
+
+```bash
+# 1. convert recordings to a LeRobot dataset
+~/vla_venv/bin/python src/groot_vla/groot_vla/export_lerobot.py \
+    --input data/demos/run1/merged --output data/datasets/run1
+
+# 2. fine-tune
+~/vla_venv/bin/lerobot-train \
+    --policy.path=lerobot/smolvla_base \
+    --policy.repo_id=local/smolvla_ur5e --policy.push_to_hub=false \
+    --dataset.repo_id=local/groot_ur5e --dataset.root=$PWD/data/datasets/run1 \
+    --rename_map='{"observation.images.wrist_view": "observation.images.camera1", "observation.images.ego_view": "observation.images.camera2"}' \
+    --batch_size=4 --steps=20000 --save_freq=500 \
+    --output_dir=$PWD/data/checkpoints/run1 \
+    --policy.device=cuda --wandb.enable=false
+
+# 3. continue a stopped run
+~/vla_venv/bin/lerobot-train \
+    --config_path=$PWD/data/checkpoints/run1/checkpoints/last/pretrained_model/train_config.json \
+    --resume=true
+```
+
+`--rename_map` is required: the checkpoint declares `camera1/2/3`, the dataset
+uses readable names.
+
+### Policy servers, by hand
+
+```bash
+ros2 run groot_vla mock_policy_server --behaviour wave --port 5555
+~/vla_venv/bin/python src/groot_vla/groot_vla/smolvla_server.py --port 5555
+~/openvla_venv/bin/python src/groot_vla/groot_vla/openvla_server.py --port 5555
+ros2 run groot_vla probe_server --host 127.0.0.1 --port 5555        # check any server
+```
+
+### Unity
+
+```bash
+unity/setup_unity_bridge.sh                                # clone + patch the ROS side
+colcon build --packages-select ros_tcp_endpoint
+ros2 launch groot_arm_bringup unity_bridge.launch.py       # listens on :10000
+```
+
+See `unity/README.md` for the Editor-side work.
+
+### When something is wrong
+
+```bash
+ros2 run groot_arm_bringup kill_stack.sh    # kill every leftover process
+ros2 daemon stop && sleep 5 && ros2 node list   # `ros2 node list` looking wrong
+ros2 control list_controllers
+ros2 topic echo /gripper_controller/controller_state --once   # desired vs actual
+nvidia-smi                                   # read the WHOLE process table
+```
+
 ## Which policy
 
 | Server | Params | VRAM measured | Latency | Action space | Fits your 6 GB? |
@@ -460,7 +634,9 @@ rm -rf ~/vla_venv && python3 -m venv /new/path/vla_venv
 | `groot_arm_description` | UR5e (from `ur_description`) + parallel gripper + wrist/scene cameras, `gz_ros2_control`, tabletop world, PBR materials and generated textures |
 | `groot_arm_moveit_config` | SRDF, kinematics, OMPL/Pilz, `move_group`, RViz, Servo |
 | `groot_arm_bringup` | `sim` / `demo` / `vla` launch files, `kill_stack.sh` |
-| `groot_vla` | policy client, observation builder, action mapper, policy node, **SmolVLA server**, mock server, probe, MoveIt helper, recorder, exporter |
+| `groot_vla` | policy client, observation builder, action mapper, policy node, SmolVLA/OpenVLA/mock servers, probe, MoveIt helper, recorder, collector, randomiser, exporter |
+| `ros_tcp_endpoint` | Unity bridge (fetched, not vendored - `unity/setup_unity_bridge.sh`) |
+| `unity/` | Unity project scaffold: package manifest and the ROS bridge script. Editor work is manual, see `unity/README.md` |
 
 Key frames and topics:
 

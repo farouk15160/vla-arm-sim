@@ -19,6 +19,16 @@ data/
 # Third-party CC0 textures, ~25 MB. Fetch with
 # src/groot_arm_description/materials/fetch_ambientcg.sh
 src/groot_arm_description/materials/ambientcg/
+# Third-party clone; recreate with unity/setup_unity_bridge.sh
+src/ros_tcp_endpoint/
+# Unity Editor generates these; only Assets/ and Packages/ are ours
+unity/Library/
+unity/Temp/
+unity/Logs/
+unity/UserSettings/
+unity/obj/
+*.csproj
+*.sln
 groot_episodes/
 groot_lerobot/
 *.safetensors
