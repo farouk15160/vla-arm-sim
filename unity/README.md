@@ -56,6 +56,30 @@ the project opens once tends to produce a project that will not open at all.
 Get the bridge working on the built-in pipeline first, then add HDRP through
 **Window -> Package Manager -> High Definition RP** and run its wizard.
 
+### If the project opens in Safe Mode
+
+Read *which package* the errors are in before assuming the robotics packages are
+at fault. A wall of `CS0619: 'TreeView' is obsolete` in
+`Library/PackageCache/com.unity.inputsystem@...` is the Input System, not
+ROS-TCP-Connector: Unity 6.5 deprecated `TreeView`, `TreeViewItem` and
+`TreeViewState` in favour of generic versions, and older Input System releases
+still use the non-generic ones.
+
+The manifest no longer requests Input System at all. Nothing here uses it -
+`GrootArmBridge.cs` reads no input - and it was the sole source of ~90 compile
+errors. If it reappears, check `Packages/packages-lock.json`: an entry with
+`"depth": 0` came from the manifest, a deeper one was pulled in by another
+package.
+
+To recover after editing the manifest, exit Safe Mode and let Unity re-resolve.
+If the errors persist, the stale copy is still cached:
+
+```bash
+rm -rf unity/Library/PackageCache/com.unity.inputsystem@*
+```
+
+then reopen the project.
+
 The robotics packages are pulled from their **default branches** rather than the
 v0.7.0 / v0.5.2 tags. Those tags date from 2022 and predate Unity 6; the tips
 are more likely to compile. If Unity reports compile errors in
