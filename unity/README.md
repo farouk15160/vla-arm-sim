@@ -110,7 +110,36 @@ The UR meshes live in `/opt/ros/jazzy/share/ur_description/meshes/`; copy that
 folder next to the URDF if Unity reports missing meshes, since it cannot follow
 `package://` URIs.
 
-## 4. Wire up the bridge
+## 4. Build the scene (one click)
+
+An empty scene after opening is expected - the project ships the URDF and the
+scripts, not a scene.
+
+**Robotics -> Build GR00T Arm Scene**
+
+That creates a floor and key light, places both cameras, adds `RosBridge` with
+`GrootArmBridge`, and resolves the six `ArticulationBody` references **by name**
+into the order the bridge indexes by. Then save the scene (Ctrl+S) as
+`Assets/GrootArm.unity`.
+
+It is scripted rather than left as Inspector work because two of those steps are
+easy to get wrong in a way that looks fine:
+
+* **Axis conventions differ.** ROS is Z-up right-handed (x forward, y left,
+  z up); Unity is Y-up left-handed. The mapping is
+  `(x, y, z)_ros -> (-y, z, x)_unity`. Typing URDF numbers straight into the
+  Inspector gives a camera pose that is almost right and silently wrong. The
+  builder also aims cameras with `LookAt` at a target point rather than a
+  quaternion, because a quaternion cannot be checked by eye.
+* **Joint order is positional.** The bridge indexes `armJoints` against a fixed
+  name list. Six bodies dragged into the array in the wrong order produce a
+  robot that moves confidently in the wrong directions - no error, just
+  nonsense.
+
+Check the Console: it logs which joints were resolved. If any are missing,
+assign those slots by hand.
+
+## 4b. Wire up the bridge manually (only if the builder failed)
 
 1. Create an empty GameObject, attach `GrootArmBridge.cs`.
 2. Assign **wristCamera** and **sceneCamera** (two Cameras placed to match
