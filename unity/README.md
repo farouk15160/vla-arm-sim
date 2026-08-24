@@ -160,6 +160,33 @@ easy to get wrong in a way that looks fine:
 Check the Console: it logs which joints were resolved. If any are missing,
 assign those slots by hand.
 
+## 5. Move the arm WITHOUT ROS first
+
+**Robotics -> Joint Jog**, press **Play**, drag the sliders.
+
+Do this before touching the bridge. It separates two questions that are
+miserable to debug together:
+
+1. Does the robot work in Unity - drives configured, joints not collapsing?
+2. Does the ROS bridge work - connection, topics, conversions?
+
+If the arm moves here, Unity is fine and anything still broken is the bridge.
+If it does not move here, no amount of ROS debugging will help.
+
+**Home** puts it in the same posture Gazebo starts from, so the two simulators
+can be compared from an identical configuration.
+
+### If the arm collapses on Play
+
+That is the classic imported-URDF failure and it is expected without the fix:
+**URDF-Importer creates ArticulationBody drives with zero stiffness**, so the
+arm has no authority to hold itself up and folds under gravity, tracking
+nothing.
+
+`Build GR00T Arm Scene` sets stiffness 10000, damping 100 and force limit 1000
+on every joint, and marks the base `immovable`. Re-run it if you re-import the
+robot. The Console logs how many joints it configured.
+
 ## 4b. Wire up the bridge manually (only if the builder failed)
 
 1. Create an empty GameObject, attach `GrootArmBridge.cs`.
@@ -170,7 +197,7 @@ assign those slots by hand.
 4. **Robotics -> ROS Settings**: protocol `ROS2`, IP = the machine running the
    endpoint, port `10000`.
 
-## 5. Run
+## 6. Run with ROS
 
 ```bash
 # terminal 1 - the bridge

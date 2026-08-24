@@ -52,6 +52,8 @@ public static class BuildGrootScene
         }
 
         BuildEnvironment();
+        BuildWorld();
+        ConfigureRobot(root);
         var wrist = BuildWristCamera(root);
         var scene = BuildSceneCamera();
         WireBridge(root, wrist, scene);
@@ -105,6 +107,120 @@ public static class BuildGrootScene
             light.color = new Color(1.0f, 0.96f, 0.9f);
             lightObject.transform.rotation = Quaternion.Euler(50f, -30f, 0f);
         }
+    }
+
+    /// ROS size (sx, sy, sz) -> Unity localScale, following the same axis
+    /// mapping as positions: Unity x is ROS y, Unity y is ROS z, Unity z is ROS x.
+    static Vector3 RosSizeToUnity(float sx, float sy, float sz) => new Vector3(sy, sz, sx);
+
+    static GameObject Box(string name, Vector3 rosPos, Vector3 rosSize, Color colour,
+                          bool isStatic, float mass = 0f)
+    {
+        var existing = GameObject.Find(name);
+        if (existing != null) Object.DestroyImmediate(existing);
+
+        var box = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        box.name = name;
+        box.transform.position = RosToUnity(rosPos.x, rosPos.y, rosPos.z);
+        box.transform.localScale = RosSizeToUnity(rosSize.x, rosSize.y, rosSize.z);
+
+        var renderer = box.GetComponent<Renderer>();
+        var material = new Material(Shader.Find("Universal Render Pipeline/Lit")
+                                    ?? Shader.Find("Standard"));
+        material.color = colour;
+        renderer.sharedMaterial = material;
+
+        if (!isStatic)
+        {
+            var body = box.AddComponent<Rigidbody>();
+            body.mass = mass;
+            // Continuous detection: a 4 cm cube closed on by fast-moving fingers
+            // will tunnel through them with the default discrete solver.
+            body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        }
+        return box;
+    }
+
+    /// Rebuilds the Gazebo tabletop: work surface, tray and three cubes, at the
+    /// same coordinates worlds/tabletop.sdf uses, so a policy trained in one
+    /// simulator sees the same layout in the other.
+    static void BuildWorld()
+    {
+        var world = GameObject.Find("World") ?? new GameObject("World");
+
+        var table = Box("work_table", new Vector3(0.50f, 0f, 0.575f),
+                        new Vector3(1.4f, 1.8f, 0.05f),
+                        new Color(0.72f, 0.60f, 0.45f), isStatic: true);
+        table.transform.SetParent(world.transform, true);
+
+        var pedestal = Box("table_base", new Vector3(0.50f, 0f, 0.275f),
+                           new Vector3(1.2f, 1.6f, 0.55f),
+                           new Color(0.26f, 0.27f, 0.30f), isStatic: true);
+        pedestal.transform.SetParent(world.transform, true);
+
+        var tray = Box("tray", new Vector3(0.50f, -0.35f, 0.605f),
+                       new Vector3(0.22f, 0.22f, 0.01f),
+                       new Color(0.55f, 0.57f, 0.60f), isStatic: true);
+        tray.transform.SetParent(world.transform, true);
+
+        // 50 g cubes, matching the SDF. Light enough for the gripper to lift,
+        // heavy enough to sit still.
+        var cubes = new (string name, Vector3 pos, Color colour)[]
+        {
+            ("red_cube",   new Vector3(0.45f,  0.16f, 0.62f), new Color(0.90f, 0.10f, 0.10f)),
+            ("green_cube", new Vector3(0.55f, -0.05f, 0.62f), new Color(0.10f, 0.80f, 0.10f)),
+            ("blue_cube",  new Vector3(0.38f, -0.18f, 0.62f), new Color(0.10f, 0.20f, 0.90f)),
+        };
+        foreach (var (name, pos, colour) in cubes)
+        {
+            var cube = Box(name, pos, new Vector3(0.04f, 0.04f, 0.04f), colour,
+                           isStatic: false, mass: 0.05f);
+            cube.transform.SetParent(world.transform, true);
+
+            // High friction, matching the SDF surface parameters. Without it the
+            // cube slides out of the fingers instead of being carried.
+            var physicMaterial = new PhysicsMaterial($"{name}_grip")
+            {
+                dynamicFriction = 1.2f,
+                staticFriction = 1.4f,
+                frictionCombine = PhysicsMaterialCombine.Maximum,
+            };
+            cube.GetComponent<Collider>().sharedMaterial = physicMaterial;
+        }
+    }
+
+    /// Makes the imported robot hold itself up and follow commands.
+    ///
+    /// URDF-Importer creates ArticulationBody drives with ZERO stiffness, so a
+    /// freshly imported arm collapses under gravity the moment you press Play
+    /// and never tracks a target. Gains have to be set explicitly; this is the
+    /// single most common reason an imported robot "does not work".
+    static void ConfigureRobot(GameObject root)
+    {
+        var rootBody = root.GetComponent<ArticulationBody>();
+        if (rootBody != null) rootBody.immovable = true;   // bolt the base down
+
+        int configured = 0;
+        foreach (var body in root.GetComponentsInChildren<ArticulationBody>())
+        {
+            if (body.jointType != ArticulationJointType.RevoluteJoint &&
+                body.jointType != ArticulationJointType.PrismaticJoint) continue;
+
+            var drive = body.xDrive;
+            // Stiff enough to hold a 6 kg forearm against gravity and track a
+            // position target; damped enough not to oscillate.
+            drive.stiffness = 10000f;
+            drive.damping = 100f;
+            drive.forceLimit = 1000f;
+            drive.target = 0f;
+            body.xDrive = drive;
+
+            body.jointFriction = 0f;      // matches the URDF, which uses 0
+            body.angularDamping = 0f;
+            configured++;
+        }
+        Debug.Log($"[GR00T] Configured drives on {configured} joints " +
+                  "(stiffness 10000, damping 100). Without this the arm collapses.");
     }
 
     static Camera BuildWristCamera(GameObject root)
