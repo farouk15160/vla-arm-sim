@@ -126,6 +126,13 @@ def launch_setup(context, *args, **kwargs):
 
     # ---------------------------------------------------------------- servo
     action_space = POLICY_ACTION_SPACE[policy]
+    execution_backend = LaunchConfiguration("execution_backend").perform(context)
+    if execution_backend == "moveit" and action_space == "eef_delta":
+        raise RuntimeError(
+            f"policy:={policy} streams eef_delta to moveit_servo, which "
+            "bypasses move_group by design; execution_backend:=moveit plans "
+            "to joint goals instead. The two cannot both drive the arm."
+        )
     if action_space == "eef_delta":
         actions.append(
             TimerAction(period=10.0, actions=[
@@ -162,6 +169,7 @@ def launch_setup(context, *args, **kwargs):
                             "policy_port": int(policy_port),
                             "instruction": instruction,
                             "action_space": action_space,
+                            "execution_backend": execution_backend,
                             "use_sim_time": True,
                         },
                     ],
@@ -243,6 +251,17 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "instruction",
             default_value="pick up the red cube and place it in the tray",
+        ),
+        DeclareLaunchArgument(
+            "execution_backend",
+            default_value="direct",
+            description=(
+                "How the policy's joint targets reach the arm. 'direct' "
+                "publishes them to the trajectory controller. 'moveit' hands "
+                "each one to move_group as a goal, so the path is planned "
+                "around the planning scene and checked for collisions."
+            ),
+            choices=["direct", "moveit"],
         ),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("gazebo_gui", default_value="true"),

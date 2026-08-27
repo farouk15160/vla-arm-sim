@@ -105,6 +105,9 @@ arm_controller (JointTrajectoryController)
 ros2_control → Gazebo physics
 ```
 
+That is the **direct** backend. There is a second one — see §3.4 — where the
+last stage is replaced by MoveIt.
+
 Three details in that diagram are non-obvious and each one was a bug first.
 
 ### 3.1 Camera order is declared, not discovered
@@ -150,6 +153,122 @@ snapshot looks like). Re-reading live took six violations per run to zero.
 
 This is a general lesson for slow policies: **a slow policy's observation is
 stale by construction; never use it as the base for a relative command.**
+
+### 3.4 Two execution backends: `direct` and `moveit`
+
+`execution_backend` decides what happens to the joint targets after the
+`ActionMapper` has cleaned them up.
+
+```
+                    ActionMapper output: (T, 6) clamped joint targets
+                                    │
+              ┌─────────────────────┴─────────────────────┐
+              ▼                                           ▼
+       execution_backend:=direct               execution_backend:=moveit
+              │                                           │
+   JointTrajectory ──► arm_controller          one waypoint ──► move_group
+              │                                           │  · plans in the
+              │                                           │    planning scene
+              │                                           │  · checks collision
+              │                                           │  · time-parameterises
+              │                                           ▼
+              │                                  ExecuteTrajectory
+              └───────────────► ros2_control ◄────────────┘
+```
+
+**`direct`** publishes the chunk straight to the `JointTrajectoryController`.
+The controller interpolates between the waypoints and tracks them. Nothing
+checks whether the path passes through the table. This is the faster, dumber
+path, and it is the default because it is what the policy was trained to
+produce.
+
+**`moveit`** takes one waypoint out of the executed slice, hands it to
+`move_group` as a joint-space goal, and blocks until the resulting plan has
+been executed. The policy chooses **where to go**; MoveIt chooses **how to get
+there**.
+
+#### What this actually buys you
+
+Everything MoveIt knows and the policy does not:
+
+| Enforced by MoveIt | Why the policy cannot do it |
+|---|---|
+| Planning-scene collisions (table, pedestal, tray) | The policy has two camera images and six joint angles. It has no geometric model of anything. |
+| Self-collision | Same. Nothing in the observation says where the arm's own links are. |
+| Velocity / acceleration limits | The chunk is positions at a fixed dt. It encodes no dynamics. |
+| Reachability | An out-of-reach target is silently clipped by the controller; MoveIt rejects it explicitly. |
+
+A VLA is trained by imitation. It reproduces the *statistics* of the
+demonstrations, and demonstrations contain no examples of driving through the
+table — so the policy has never been penalised for proposing it. Nothing in the
+architecture prevents it. MoveIt is the component that actually knows the
+table exists.
+
+#### What it costs
+
+Reactivity, and a lot of it.
+
+`direct` is fire-and-forget: publish and immediately start the next inference.
+`moveit` blocks for plan time plus **execution time** — the full duration of
+the motion. The loop becomes:
+
+```
+observe → infer (~850 ms) → plan (~50-200 ms) → execute (until arrival) → repeat
+```
+
+so the arm is committed to a goal chosen from an observation that keeps ageing
+while it travels. That is the opposite of the closed-loop argument in §7.1.
+The trade is explicit: **`direct` reacts faster, `moveit` cannot hit the table.**
+
+Use `moveit` when the policy is undertrained or unproven — which is exactly the
+situation with a 41-episode checkpoint — and `direct` once you trust it and
+want the reaction time back.
+
+#### Which waypoint becomes the goal
+
+`moveit_goal_index` selects it out of the executed slice; `-1` (default) is the
+last. A lower index re-plans more often, which is safer and more reactive, but
+the arm spends a larger share of its time decelerating into a goal rather than
+moving. Note that the goal is taken from the targets **after** rate limiting
+and joint clamping, so a policy that proposes a wild jump gets walked toward
+it rather than asking MoveIt to swing the arm across the workspace in one plan.
+
+#### A failed plan is not a fault
+
+If MoveIt refuses the goal — unreachable, or in collision — the node logs it,
+increments `plan_failures`, and holds. It does **not** disable the policy. An
+occasional rejection is the planner doing its job on a goal the policy chose
+blind. A *rising* `plan_failures` count is the signal worth acting on: it means
+the policy is persistently proposing configurations that are not reachable,
+which usually means it is out of distribution.
+
+Both counters are on `/groot_policy/status`:
+
+```jsonc
+{ "execution_backend": "moveit", "last_plan_ms": 118.4, "plan_failures": 0 }
+```
+
+#### Halting mid-execution
+
+`/groot_policy/halt` calls `MoveItHelper.abort()` **before** publishing the hold
+position. Order matters: a MoveIt trajectory already executing would otherwise
+keep driving to its goal, then overwrite the hold — so the halt would appear to
+have been ignored for as long as the motion took. `abort()` latches, and the
+enable service clears it, so a halt cannot silently poison the next run.
+
+#### The combination that is refused
+
+`execution_backend:=moveit` with `action_space:=eef_delta` is rejected at launch:
+
+```
+policy:=openvla streams eef_delta to moveit_servo, which bypasses move_group
+by design; execution_backend:=moveit plans to joint goals instead.
+The two cannot both drive the arm.
+```
+
+`moveit_servo` and `move_group` are two different controllers of the same
+joints. Running both means two writers on one resource, and the failure mode is
+a fighting arm rather than a clean error — so it is refused up front.
 
 ---
 
@@ -406,8 +525,14 @@ anything is running the checkpoint on the cell and counting completed picks.
 
 ```bash
 ros2 launch groot_arm_bringup system.launch.py policy:=smolvla \
-  policy_model:=data/checkpoints/pickplace/checkpoints/last/pretrained_model
+  policy_model:=data/checkpoints/pickplace/checkpoints/last/pretrained_model \
+  execution_backend:=moveit
 ```
+
+`execution_backend:=moveit` is the right default for a freshly fine-tuned
+checkpoint you have not yet evaluated (§3.4): the policy is unproven, and
+MoveIt is what stops an unproven policy from driving into the table. Switch to
+`direct` once it has earned it.
 
 The server reads the checkpoint's own normalisation statistics and feature
 declarations, so nothing needs to be configured to match — a mismatch is

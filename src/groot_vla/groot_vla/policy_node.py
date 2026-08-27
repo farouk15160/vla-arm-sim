@@ -39,6 +39,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from groot_vla.action_mapper import ARM_JOINTS, ActionDecodeError, ActionMapper, joint_positions_to_array
 from groot_vla.groot_client import GrootClient, PolicyServerError
+from groot_vla.moveit_helper import MoveItError, MoveItHelper
 from groot_vla.observation_builder import CameraSpec, ImageDecodeError, ObservationBuilder, image_to_rgb, resize_rgb
 
 # Gazebo publishes images best-effort; a reliable subscription would silently
@@ -85,6 +86,21 @@ class GrootPolicyNode(Node):
         self.declare_parameter("gripper_closed_position", 0.0)
         self.declare_parameter("invert_gripper_action", False)
 
+        # "direct"  - publish the chunk straight to the trajectory controller.
+        # "moveit"   - hand the chunk's endpoint to move_group as a joint goal
+        #              and let it plan a collision-checked path there.
+        self.declare_parameter("execution_backend", "direct")
+        # Which waypoint of the executed slice becomes the MoveIt goal.
+        # -1 = the last one. Earlier indices re-plan more often: safer and
+        # more reactive, but the arm spends more of its time decelerating
+        # into a goal instead of moving.
+        self.declare_parameter("moveit_goal_index", -1)
+        self.declare_parameter("moveit_planning_time", 1.0)
+        self.declare_parameter("moveit_velocity_scaling", 0.25)
+        self.declare_parameter("moveit_acceleration_scaling", 0.25)
+        self.declare_parameter("moveit_goal_tolerance", 0.01)
+        self.declare_parameter("moveit_group_name", "ur_manipulator")
+
         self.declare_parameter("arm_command_topic", "/arm_controller/joint_trajectory")
         self.declare_parameter("gripper_command_topic", "/gripper_controller/joint_trajectory")
         self.declare_parameter("servo_twist_topic", "/servo_node/delta_twist_cmds")
@@ -119,6 +135,7 @@ class GrootPolicyNode(Node):
         self._inference_count = 0
         self._failure_count = 0
         self._last_latency_ms = 0.0
+        self._last_plan_ms = 0.0
         self._last_error = ""
         self._last_twist: np.ndarray | None = None
         self._last_twist_time = 0.0
@@ -234,6 +251,35 @@ class GrootPolicyNode(Node):
             api_token=(self.get_parameter("api_token").value or None),
         )
 
+        self._moveit_node = None
+        self._moveit: MoveItHelper | None = None
+        self._plan_failures = 0
+        if self.execution_backend == "moveit":
+            if self.action_space == "eef_delta":
+                raise RuntimeError(
+                    "execution_backend:=moveit is incompatible with "
+                    "action_space:=eef_delta. eef_delta streams velocity "
+                    "commands to moveit_servo, which bypasses move_group by "
+                    "design; move_group plans to a joint goal instead. Pick "
+                    "one: action_space:=joint_position for the MoveIt path."
+                )
+            # MoveItHelper spins its own executor inside blocking calls, and
+            # this node is driven by a MultiThreadedExecutor. One node cannot
+            # belong to both, so the helper gets its own.
+            self._moveit_node = rclpy.create_node("groot_policy_moveit")
+            self._moveit = MoveItHelper(
+                self._moveit_node,
+                group_name=self.moveit_group_name,
+                base_frame=self.workspace_frame,
+                planning_time=self.moveit_planning_time,
+                velocity_scaling=self.moveit_velocity_scaling,
+                acceleration_scaling=self.moveit_acceleration_scaling,
+            )
+            self.get_logger().info(
+                "execution backend: MoveIt. The policy proposes joint goals; "
+                "move_group plans a collision-checked path to each one."
+            )
+
         self._worker = threading.Thread(target=self._control_loop, daemon=True, name="groot_inference")
         self._worker.start()
 
@@ -274,6 +320,18 @@ class GrootPolicyNode(Node):
         self.action_dt = float(get("action_dt"))
         self.gripper_open_position = float(get("gripper_open_position"))
         self.gripper_closed_position = float(get("gripper_closed_position"))
+        self.execution_backend = str(get("execution_backend")).lower()
+        if self.execution_backend not in ("direct", "moveit"):
+            raise ValueError(
+                f"execution_backend must be 'direct' or 'moveit', "
+                f"got {self.execution_backend!r}"
+            )
+        self.moveit_goal_index = int(get("moveit_goal_index"))
+        self.moveit_planning_time = float(get("moveit_planning_time"))
+        self.moveit_velocity_scaling = float(get("moveit_velocity_scaling"))
+        self.moveit_acceleration_scaling = float(get("moveit_acceleration_scaling"))
+        self.moveit_goal_tolerance = float(get("moveit_goal_tolerance"))
+        self.moveit_group_name = str(get("moveit_group_name"))
         self.arm_command_topic = str(get("arm_command_topic"))
         self.gripper_command_topic = str(get("gripper_command_topic"))
         self.servo_twist_topic = str(get("servo_twist_topic"))
@@ -315,6 +373,11 @@ class GrootPolicyNode(Node):
     # services
     # ------------------------------------------------------------------ #
     def _on_enable(self, request: SetBool.Request, response: SetBool.Response) -> SetBool.Response:
+        if request.data and self._moveit is not None:
+            # abort() latches, so a previous halt would otherwise reject every
+            # goal of the new run.
+            self._moveit.clear_abort()
+            self._plan_failures = 0
         if request.data and not self._client.ping():
             response.success = False
             response.message = (
@@ -432,11 +495,51 @@ class GrootPolicyNode(Node):
             targets = self._action_mapper.to_joint_targets(arm_chunk, current_arm)
             targets = targets[: max(self.execution_horizon, 1)]
             self._check_workspace()
-            self._publish_arm_trajectory(targets)
+            if self._moveit is not None:
+                self._execute_via_moveit(targets)
+            else:
+                self._publish_arm_trajectory(targets)
 
         if gripper_chunk.size:
             fingers = self._action_mapper.to_finger_targets(gripper_chunk)
             self._publish_gripper(float(fingers[0]))
+
+    def _execute_via_moveit(self, targets: np.ndarray) -> None:
+        """Hand one waypoint to move_group and block until it is reached.
+
+        The policy supplies the goal; MoveIt supplies the path. Everything
+        MoveIt knows and the policy does not - the planning scene, the
+        pedestal, the table, self-collision, joint velocity and acceleration
+        limits - is enforced here, on a target the policy chose blind.
+
+        A plan that fails is NOT a fault: an unreachable or in-collision goal
+        is the planner doing its job. The arm simply holds and the next
+        inference proposes somewhere else. Only a run of consecutive failures
+        means something is actually wrong.
+        """
+        if self.dry_run:
+            self.get_logger().info(f"[dry_run] moveit goal: {np.round(targets[-1], 4)}")
+            return
+
+        index = self.moveit_goal_index
+        if index < 0:
+            index = len(targets) + index
+        index = int(np.clip(index, 0, len(targets) - 1))
+        goal = {joint: float(value) for joint, value in zip(ARM_JOINTS, targets[index])}
+
+        started = time.monotonic()
+        try:
+            self._moveit.move_to_joints(goal, tolerance=self.moveit_goal_tolerance)
+        except MoveItError as exc:
+            self._plan_failures += 1
+            self._last_error = str(exc)
+            self.get_logger().warn(
+                f"MoveIt refused the policy's goal ({exc}); holding. "
+                f"consecutive failures: {self._plan_failures}"
+            )
+            return
+        self._plan_failures = 0
+        self._last_plan_ms = (time.monotonic() - started) * 1000.0
 
     def _collect_observation(self) -> tuple[dict[str, Any], dict[str, float]]:
         now = time.monotonic()
@@ -500,6 +603,12 @@ class GrootPolicyNode(Node):
 
     def _halt(self) -> None:
         """Freeze the arm at its current measured position."""
+        # Cancel first. A MoveIt trajectory already running would otherwise
+        # keep driving to its goal for as long as it takes, and the hold
+        # published below would be overwritten the moment it resumed - so the
+        # halt would look like it had been ignored.
+        if self._moveit is not None:
+            self._moveit.abort()
         with self._lock:
             joint_positions = dict(self._joint_positions)
         if not all(j in joint_positions for j in ARM_JOINTS):
@@ -624,7 +733,11 @@ class GrootPolicyNode(Node):
             "failures": self._failure_count,
             "last_latency_ms": round(self._last_latency_ms, 1),
             "last_error": self._last_error,
+            "execution_backend": self.execution_backend,
         }
+        if self._moveit is not None:
+            status["last_plan_ms"] = round(self._last_plan_ms, 1)
+            status["plan_failures"] = self._plan_failures
         self._status_publisher.publish(String(data=json.dumps(status)))
 
     def destroy_node(self) -> bool:
@@ -632,6 +745,10 @@ class GrootPolicyNode(Node):
         if self._worker.is_alive():
             self._worker.join(timeout=2.0)
         self._client.close()
+        if self._moveit is not None:
+            self._moveit.abort()
+        if self._moveit_node is not None:
+            self._moveit_node.destroy_node()
         return super().destroy_node()
 
 

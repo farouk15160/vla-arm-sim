@@ -16,6 +16,7 @@ planner's whole time budget first.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from typing import Sequence
 
@@ -136,6 +137,10 @@ class MoveItHelper:
 
         self._joint_state: JointState | None = None
         node.create_subscription(JointState, "/joint_states", self._on_joint_state, 10)
+
+        self._handle_lock = threading.Lock()
+        self._active_handle = None
+        self._aborted = threading.Event()
 
     def _on_joint_state(self, msg: JointState) -> None:
         self._joint_state = msg
@@ -423,6 +428,9 @@ class MoveItHelper:
         return future.result()
 
     def _call_action(self, client: ActionClient, goal, timeout: float = 120.0):
+        if self._aborted.is_set():
+            raise MoveItError("aborted before the goal was sent")
+
         send_future = client.send_goal_async(goal)
         if not self._spin_until(send_future, 30.0):
             raise MoveItError("timed out waiting for the goal to be accepted")
@@ -430,10 +438,44 @@ class MoveItHelper:
         if handle is None or not handle.accepted:
             raise MoveItError("goal was rejected by the action server")
 
-        result_future = handle.get_result_async()
-        if not self._spin_until(result_future, timeout):
-            raise MoveItError("action timed out")
-        return result_future.result().result
+        # Publish the handle so abort() - called from another thread, e.g. the
+        # /halt service - can cancel a move that is already executing. Without
+        # this, halting during a MoveIt execution only takes effect once the
+        # trajectory finishes, which is exactly when you least want to wait.
+        with self._handle_lock:
+            self._active_handle = handle
+        try:
+            result_future = handle.get_result_async()
+            if not self._spin_until(result_future, timeout):
+                raise MoveItError("action timed out")
+            return result_future.result().result
+        finally:
+            with self._handle_lock:
+                self._active_handle = None
+
+    # ------------------------------------------------------------------ #
+    # abort
+    # ------------------------------------------------------------------ #
+    def abort(self) -> None:
+        """Cancel any in-flight goal and refuse new ones until cleared.
+
+        Safe to call from a thread other than the one blocked in a move.
+        """
+        self._aborted.set()
+        with self._handle_lock:
+            handle = self._active_handle
+        if handle is not None:
+            try:
+                handle.cancel_goal_async()
+            except Exception:  # noqa: BLE001 - a failed cancel must not mask
+                pass          # whatever emergency prompted the abort
+
+    def clear_abort(self) -> None:
+        self._aborted.clear()
+
+    @property
+    def aborted(self) -> bool:
+        return self._aborted.is_set()
 
 
 # --------------------------------------------------------------------------- #

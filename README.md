@@ -187,6 +187,40 @@ ros2 topic echo /gripper_controller/controller_state --once   # desired vs actua
 nvidia-smi                                   # read the WHOLE process table
 ```
 
+## VLA plans, MoveIt executes
+
+By default the policy's joint targets go straight to the trajectory
+controller. `execution_backend:=moveit` instead hands each one to `move_group`
+as a goal, so the path is planned around the planning scene and checked for
+collisions before the arm moves:
+
+```bash
+ros2 launch groot_arm_bringup system.launch.py policy:=smolvla \
+  execution_backend:=moveit
+```
+
+The policy chooses *where* to go; MoveIt chooses *how* to get there. It costs
+reactivity — the loop blocks for the whole motion, not just the plan — and buys
+collision checking, self-collision checking, velocity/acceleration limits, and
+an explicit rejection for unreachable goals instead of silent clipping.
+
+Worth it whenever the policy is undertrained or unproven. Tuning:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `moveit_goal_index` | `-1` | Which waypoint of the executed slice is the goal. Lower = re-plan more often. |
+| `moveit_planning_time` | `1.0` | Planner budget, seconds. |
+| `moveit_velocity_scaling` | `0.25` | Fraction of joint velocity limits. |
+| `moveit_goal_tolerance` | `0.01` | Joint goal tolerance, radians. |
+
+Watch `plan_failures` on `/groot_policy/status`. A single rejection is the
+planner doing its job on a goal the policy chose blind; a rising count means
+the policy is persistently proposing unreachable configurations.
+
+Not combinable with `policy:=openvla`, which streams `eef_delta` to
+`moveit_servo` — that bypasses `move_group` by design, and launch refuses the
+combination rather than letting two controllers fight over the same joints.
+
 ## Which policy
 
 | Server | Params | VRAM measured | Latency | Action space | Fits your 6 GB? |
